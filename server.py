@@ -11,6 +11,11 @@ LOG=BASE/"furkai.log"
 STATE={"running":False,"mode":"paper","last_scan":0,"last_error":None,"signals":{},"prices":{},
        "positions":[],"oi":{},"logs":[],"trade_log":[],"paper_balance":10000.0,
        "scan_thread":None,"scan_interval":30}
+QUOTE_CACHE={}
+HISTORY_CACHE={}
+CACHE_LOCK=threading.RLock()
+QUOTE_TTL=15
+HISTORY_TTL=300
 
 DEFAULT={
  "mode":"paper","api_key":"","api_secret":"","testnet":True,
@@ -54,23 +59,50 @@ def yahoo_chart(symbol, period="1y", interval="1d"):
     symbol=str(symbol).strip().upper()
     if symbol.isalpha() and not symbol.endswith(".IS") and symbol not in ("BTCUSDT","ETHUSDT","PAXGUSDT","XAUUSDT"):
         symbol += ".IS"
-    url=f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(symbol)}?interval={urllib.parse.quote(interval)}&range={urllib.parse.quote(period)}"
-    data=http_json(url, timeout=15)
-    result=(data.get("chart") or {}).get("result") or []
-    if not result: raise RuntimeError("Yahoo veri döndürmedi")
-    r=result[0]
-    return {"symbol":symbol,"meta":r.get("meta") or {},"quote":((r.get("indicators") or {}).get("quote") or [{}])[0],
-            "timestamp":r.get("timestamp") or []}
+    key=(symbol,period,interval)
+    now=time.time()
+    with CACHE_LOCK:
+        cached=HISTORY_CACHE.get(key)
+        if cached and now-cached["ts"] < HISTORY_TTL:
+            return cached["data"]
+    last_error=None
+    for host in ("query1.finance.yahoo.com","query2.finance.yahoo.com"):
+        url=f"https://{host}/v8/finance/chart/{urllib.parse.quote(symbol)}?interval={urllib.parse.quote(interval)}&range={urllib.parse.quote(period)}&events=div%2Csplits"
+        try:
+            data=http_json(url, timeout=15, headers={"Accept":"application/json"})
+            result=(data.get("chart") or {}).get("result") or []
+            if not result: raise RuntimeError("Yahoo veri döndürmedi")
+            r=result[0]
+            out={"symbol":symbol,"meta":r.get("meta") or {},"quote":((r.get("indicators") or {}).get("quote") or [{}])[0],"timestamp":r.get("timestamp") or []}
+            with CACHE_LOCK: HISTORY_CACHE[key]={"ts":now,"data":out}
+            return out
+        except Exception as exc: last_error=exc
+    raise RuntimeError(f"Piyasa verisi alınamadı ({symbol}): {last_error}")
 
 def yahoo_quote(symbol):
-    d=yahoo_chart(symbol,"2d","1d"); meta=d["meta"]
-    price=meta.get("regularMarketPrice") or meta.get("previousClose")
-    if price is None: raise RuntimeError("Güncel fiyat alanı boş")
-    prev=meta.get("previousClose")
-    change=(float(price)-float(prev)) if prev is not None else None
-    pct=(change/float(prev)*100) if prev not in (None,0) and change is not None else None
-    return {"ok":True,"symbol":d["symbol"],"price":float(price),"previousClose":float(prev) if prev is not None else None,
-            "dailyChange":change,"dailyChangePct":pct,"timestamp":int(time.time()),"source":"server:yahoo"}
+    clean=str(symbol).strip().upper()
+    d=yahoo_chart(clean,"2d","1d"); meta=d["meta"]
+    price=meta.get("regularMarketPrice")
+    prev=meta.get("previousClose") or meta.get("chartPreviousClose")
+    if price is None:
+        raise RuntimeError("Güncel fiyat alanı boş; veri yokken 0 gösterilmeyecek")
+    price=float(price); prev=float(prev) if prev is not None else None
+    change=(price-prev) if prev is not None else None
+    pct=(change/prev*100) if prev not in (None,0) and change is not None else None
+    market_ts=meta.get("regularMarketTime")
+    age=int(time.time()-market_ts) if market_ts else None
+    return {"ok":True,"symbol":d["symbol"],"price":price,"previousClose":prev,"dailyChange":change,"dailyChangePct":pct,"timestamp":int(time.time()),"marketTimestamp":market_ts,"ageSeconds":age,"stale":bool(age is not None and age>900),"source":"server:yahoo","warning":"Yahoo gecikmeli olabilir" if age is None or age>120 else ""}
+
+def yahoo_quotes(symbols):
+    out={}; errors=[]
+    unique=list(dict.fromkeys(str(x).strip().upper() for x in symbols if str(x).strip()))
+    with ThreadPoolExecutor(max_workers=min(8,max(1,len(unique)))) as pool:
+        fm={pool.submit(yahoo_quote,s):s for s in unique}
+        for fut in as_completed(fm):
+            sym=fm[fut]
+            try: out[sym]=fut.result()
+            except Exception as exc: errors.append({"symbol":sym,"error":str(exc)})
+    return {"ok":True,"quotes":out,"errors":errors,"timestamp":int(time.time()),"source":"Yahoo server proxy","fresh":sum(1 for v in out.values() if not v.get("stale"))}
 
 def binance_klines(symbol, limit=300, interval="1m"):
     symbol=str(symbol).upper()
@@ -342,44 +374,52 @@ def get_bist_universe():
 
 def yahoo_history(symbol, period="1y", allowed_symbols=None):
     symbol = symbol.upper().strip().replace(".IS", "")
-    if symbol not in (allowed_symbols or BIST_UNIVERSE):
-        raise ValueError("Sembol tarama evreninde değil")
-    url = "https://query1.finance.yahoo.com/v8/finance/chart/" + urllib.parse.quote(symbol + ".IS")
-    url += "?range=" + urllib.parse.quote(period) + "&interval=1d&events=div%2Csplits"
-    req = urllib.request.Request(url, headers={"User-Agent":"FurkAI/39 (local research terminal)"})
-    with urllib.request.urlopen(req, timeout=12) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-    row = payload.get("chart", {}).get("result", [None])[0]
-    quote = (row or {}).get("indicators", {}).get("quote", [{}])[0]
-    closes = [float(x) for x in quote.get("close", []) if isinstance(x, (int, float)) and math.isfinite(x)]
-    volumes = [float(x) for x in quote.get("volume", []) if isinstance(x, (int, float)) and math.isfinite(x)]
-    if len(closes) < 60 or len(volumes) < 20:
-        raise ValueError("Yeterli OHLCV verisi yok")
-    return closes, volumes
+    if symbol not in (allowed_symbols or BIST_UNIVERSE): raise ValueError("Sembol tarama evreninde değil")
+    d=yahoo_chart(symbol+".IS",period,"1d"); q=d.get("quote") or {}
+    def finite(name): return [float(x) for x in q.get(name,[]) if isinstance(x,(int,float)) and math.isfinite(x)]
+    opens,highs,lows,closes,volumes=map(finite,("open","high","low","close","volume"))
+    n=min(map(len,(opens,highs,lows,closes,volumes)))
+    if n<60: raise ValueError("Yeterli OHLCV verisi yok")
+    return {"open":opens[-n:],"high":highs[-n:],"low":lows[-n:],"close":closes[-n:],"volume":volumes[-n:]}
+
+def _sma(vals,n): return sum(vals[-n:])/n if len(vals)>=n else None
+def _ema_last(vals,n): return ema(vals[-min(len(vals),n*4):],n) if len(vals)>=n else None
+def _macd_last(vals):
+    if len(vals)<35:return 0,0
+    line=ema(vals,12)-ema(vals,26); hist=[]
+    for i in range(26,len(vals)):
+        hist.append(ema(vals[:i+1],12)-ema(vals[:i+1],26))
+    sig=ema(hist,9) if hist else line
+    return line,sig
+def _adx_last(high,low,close,n=14):
+    if len(close)<n*2+1:return None
+    trs=[]; plus=[]; minus=[]
+    for i in range(1,len(close)):
+        trs.append(max(high[i]-low[i],abs(high[i]-close[i-1]),abs(low[i]-close[i-1])))
+        up=high[i]-high[i-1]; dn=low[i-1]-low[i]
+        plus.append(up if up>dn and up>0 else 0); minus.append(dn if dn>up and dn>0 else 0)
+    atrv=sum(trs[-n:])/n or 1; p=sum(plus[-n:])/n; m=sum(minus[-n:])/n
+    pdi=100*p/atrv; mdi=100*m/atrv; return 100*abs(pdi-mdi)/max(pdi+mdi,1e-9)
 
 def scan_bist_symbol(symbol, period, rsi_max, volume_min, selected, allowed_symbols):
-    closes, volumes = yahoo_history(symbol, period, allowed_symbols)
-    last = closes[-1]
-    e20, e50 = ema(closes[-100:], 20), ema(closes[-150:], 50)
-    r = rsi(closes, 14)
-    vol_ratio = volumes[-1] / max(sum(volumes[-20:]) / len(volumes[-20:]), 1)
-    near_high = last >= max(closes[-min(len(closes), 252):]) * .95
-    checks = {
-        "trend": last > e20,
-        "golden": e20 > e50,
-        "rsi": r <= rsi_max,
-        "volume": vol_ratio >= volume_min,
-        "breakout": near_high,
-        "momentum": last > closes[-2],
+    d=yahoo_history(symbol,period,allowed_symbols); o,h,l,c,v=d["open"],d["high"],d["low"],d["close"],d["volume"]
+    last=c[-1]; e20=_ema_last(c,20); e50=_ema_last(c,50); s50=_sma(c,50); s200=_sma(c,200); r=rsi(c,14); vr=v[-1]/max(_sma(v,20) or 1,1)
+    mac,ms=_macd_last(c); hi52=max(c[-min(252,len(c)):]); momentum=(last/c[-6]-1)*100 if len(c)>6 else 0; adx=_adx_last(h,l,c)
+    body=abs(c[-1]-o[-1]); rng=max(h[-1]-l[-1],1e-9); hammer=(min(o[-1],c[-1])-l[-1]>body*1.5 and (h[-1]-max(o[-1],c[-1]))<body); doji=body/rng<0.12
+    checks={
+      "golden":bool(s50 and s200 and s50>s200),
+      "breakout":last>=hi52*.995,
+      "volume":vr>=volume_min and last>e20,
+      "rsi":r<=rsi_max,
+      "macd":mac>ms,
+      "hammer":hammer or doji,
+      "adx":bool(adx is not None and adx>=20),
+      "momentum":momentum>0,
+      "trend":last>e20 and e20>e50
     }
-    enabled = [key for key, value in selected.items() if value]
-    passed = [key for key in enabled if checks[key]]
-    score = round(100 * len(passed) / max(1, len(enabled)))
-    return {"symbol":symbol, "price":round(last, 4), "rsi":round(r, 2),
-            "ema20":round(e20, 4), "ema50":round(e50, 4),
-            "volume_ratio":round(vol_ratio, 2), "score":score,
-            "passed":passed, "conditions":checks,
-            "trend":"Yükseliş" if checks["trend"] and checks["golden"] else "Karışık"}
+    enabled=[k for k,vv in selected.items() if vv]; passed=[k for k in enabled if checks[k]]
+    score=round(100*len(passed)/max(1,len(enabled)))
+    return {"symbol":symbol,"price":round(last,4),"rsi":round(r,2),"ema20":round(e20,4),"ema50":round(e50,4),"sma50":round(s50,4) if s50 else None,"sma200":round(s200,4) if s200 else None,"volume_ratio":round(vr,2),"macd":round(mac,4),"macd_signal":round(ms,4),"adx":round(adx,2) if adx is not None else None,"momentum":round(momentum,2),"score":score,"passed":passed,"conditions":checks,"trend":"Yükseliş" if checks["trend"] else "Karışık"}
 
 def scan_bist(body):
     period = str(body.get("period", "1y"))
@@ -397,7 +437,7 @@ def scan_bist(body):
     limit = min(700, max(1, int(body.get("limit", len(symbols)))))
     symbols = symbols[:limit]
     input_conditions = body.get("conditions", {}) if isinstance(body.get("conditions"), dict) else {}
-    selected = {key: bool(input_conditions.get(key, True)) for key in ("trend", "golden", "rsi", "volume", "breakout", "momentum")}
+    selected = {key: bool(input_conditions.get(key, True)) for key in ("trend", "golden", "rsi", "volume", "breakout", "momentum", "macd", "hammer", "adx")}
     if not any(selected.values()): raise ValueError("En az bir koşul seçilmeli")
     # Fail once and clearly when the external provider cannot be reached,
     # rather than making the user wait through hundreds of identical failures.
@@ -460,7 +500,7 @@ class Handler(BaseHTTPRequestHandler):
         if p.path=="/service-worker.js":
             data=(BASE/"service-worker.js").read_bytes();self.send_response(200);self.send_header("Content-Type","application/javascript; charset=utf-8");self.send_header("Service-Worker-Allowed","/");self.send_header("Content-Length",str(len(data)));self.end_headers();self.wfile.write(data);return
         try:
-            if p.path=="/api/health":return self.sendj({"ok":True,"version":"V41 Unified","mode":DEFAULT["mode"],"testnet":bool(DEFAULT.get("testnet",True)),"running":STATE["running"],"last_error":STATE["last_error"]})
+            if p.path=="/api/health":return self.sendj({"ok":True,"version":"V42 Unified","mode":DEFAULT["mode"],"testnet":bool(DEFAULT.get("testnet",True)),"running":STATE["running"],"last_error":STATE["last_error"]})
             if p.path=="/api/state":return self.sendj({"ok":True,"config":{k:v for k,v in DEFAULT.items() if k not in ("api_secret","gemini_key")},"signals":STATE["signals"],"last_scan":STATE["last_scan"],"running":STATE["running"],"logs":STATE["logs"][:80]})
             if p.path=="/api/account":return self.sendj(account())
             if p.path=="/api/scan":return self.sendj({"ok":True,"signals":scan()})
@@ -475,6 +515,9 @@ class Handler(BaseHTTPRequestHandler):
             if p.path=="/api/quote":
                 q=urllib.parse.parse_qs(p.query); s=q.get("symbol",["THYAO.IS"])[0]
                 return self.sendj(yahoo_quote(s))
+            if p.path=="/api/quotes":
+                q=urllib.parse.parse_qs(p.query); symbols=q.get("symbols",[""])[0].split(",")
+                return self.sendj(yahoo_quotes(symbols))
             if p.path=="/api/history":
                 q=urllib.parse.parse_qs(p.query); s=q.get("symbol",["THYAO.IS"])[0]
                 period=q.get("range",["1y"])[0]; interval=q.get("interval",["1d"])[0]
@@ -489,6 +532,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(404);self.end_headers()
         except Exception as e:
             STATE["last_error"]=str(e);self.sendj({"ok":False,"error":str(e)},500)
+    def do_HEAD(self):
+        if self.path=="/api/health":
+            self.send_response(200); self.send_header("Content-Length","0"); self.end_headers(); return
+        self.send_response(200); self.send_header("Content-Length","0"); self.end_headers()
+
     def do_POST(self):
         if not authorized(self.headers):
             self.send_response(401)

@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="FurkAI">
 
-<title>FurkAI Akıllı Borsa V41 Unified</title>
+<title>FurkAI Akıllı Borsa V42 Unified</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 <script>window.TradingView = window.TradingView || null;</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
@@ -272,6 +272,17 @@ tr:hover td{background:var(--bg3)}
 
 /* V20 CONFLUENCE UI */
 .v20-hero{position:relative;overflow:hidden}.v20-pill{display:inline-flex;vertical-align:middle;margin-left:8px;padding:4px 8px;border-radius:999px;background:rgba(53,214,160,.12);color:#35d6a0;font-size:9px;letter-spacing:.08em}.v20-pill.gold{background:rgba(244,183,74,.12);color:#f4b74a}.v20-controls{display:flex;gap:8px;flex-wrap:wrap;margin-top:15px}.v20-select{background:#131e27;border:1px solid #2a3a49;border-radius:8px;padding:9px 11px;color:#fff;min-width:190px}.v20-status{margin:12px 0;padding:10px 12px;border:1px solid #233241;background:#0d151d;border-radius:9px;color:#9aa9b8;font-size:11px}.v20-grid-main{display:grid;grid-template-columns:1.15fr .85fr;gap:14px}.v20-grid-3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:14px}.v20-price-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}.v20-muted{font-size:10px;color:var(--text3);margin-top:4px}.v20-score-panel{margin-top:12px}.v20-score{display:flex;align-items:center;gap:12px;padding:13px;border:1px solid #233241;background:#101923;border-radius:10px}.v20-score-num{font-size:28px;font-weight:800}.v20-score-label{font-size:12px;font-weight:750}.v20-empty{padding:18px;border:1px dashed #2a3947;border-radius:10px;color:var(--text3);font-size:11px}.v20-metrics{margin-top:12px;font-size:11px;line-height:1.8;color:var(--text2)}.v20-metric{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid rgba(255,255,255,.04);padding:5px 0}.v20-metric b{color:var(--text)}.v20-section-title{font-size:13px;font-weight:800;margin-bottom:8px}.v20-reason{font-size:11px;line-height:1.8;color:var(--text2)}.v20-reason .good{color:#35d6a0}.v20-reason .warn{color:#f4b74a}.v20-reason .bad{color:#ff6b6b}.v20-level{padding:8px 10px;border-radius:8px;background:#101923;margin:5px 0}.v20-level.support{border-left:3px solid #35d6a0}.v20-level.resistance{border-left:3px solid #ff6b6b}.v20-level.neutral{border-left:3px solid #6f8091}.v20-plan-box{background:#101923;border:1px solid #233241;border-radius:9px;padding:10px;margin-top:7px}.v20-danger{color:#ff6b6b}.v20-good{color:#35d6a0}.v20-warn{color:#f4b74a}@media(max-width:1000px){.v20-grid-main,.v20-grid-3{grid-template-columns:1fr}}
+
+/* V42 scanner redesign */
+.scanner-model-grid{display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px!important;margin-bottom:14px}
+.scanner-model{min-height:92px!important;border:1px solid var(--border)!important;border-radius:16px!important;background:linear-gradient(145deg,var(--bg2),var(--bg3))!important;padding:14px!important;transition:.18s!important;cursor:pointer;box-shadow:0 8px 24px rgba(0,0,0,.08)}
+.scanner-model.active{border-color:var(--accent)!important;box-shadow:0 0 0 1px var(--accent),0 12px 30px rgba(0,0,0,.12)!important;transform:translateY(-1px)}
+.scanner-model .sm-icon{font-size:22px!important;margin-bottom:7px}.scanner-model b{display:block;font-size:13px}.scanner-model small{display:block;color:var(--text3);margin-top:4px}
+#scanner-results{border-radius:16px!important;box-shadow:0 10px 30px rgba(0,0,0,.08)}
+#scanner-results table th{position:sticky;top:0;background:var(--bg3);font-size:11px;color:var(--text3);z-index:1}
+#scanner-results table td{border-top:1px solid var(--border);font-size:12px}
+@media(max-width:800px){.scanner-model-grid{grid-template-columns:repeat(2,minmax(0,1fr))!important}.scanner-model{min-height:80px!important}.scanner-model-grid + .card{padding:14px!important}}
+@media(max-width:520px){.scanner-model-grid{display:flex!important;overflow-x:auto!important;scroll-snap-type:x mandatory;padding-bottom:4px}.scanner-model{min-width:155px!important;scroll-snap-align:start}.scanner-model-grid::-webkit-scrollbar{display:none}}
 </style>
 
 <style id="furkai-v9-theme">
@@ -496,12 +507,15 @@ tr:hover td{background:#121b24}.ticker-badge{background:#16212b;border-color:#26
           <label>Tarama limiti<input id="scan-limit" class="form-input" type="number" value="650" min="1" max="700"></label>
         </div>
         <div id="scan-conditions" style="display:flex;gap:12px;flex-wrap:wrap;margin-top:14px;font-size:12px;color:var(--text2)">
-          <label><input type="checkbox" data-scan-condition="trend" checked> Fiyat EMA20 üstü</label>
-          <label><input type="checkbox" data-scan-condition="golden" checked> EMA20 &gt; EMA50</label>
-          <label><input type="checkbox" data-scan-condition="rsi" checked> RSI filtresi</label>
-          <label><input type="checkbox" data-scan-condition="volume" checked> Hacim filtresi</label>
-          <label><input type="checkbox" data-scan-condition="breakout"> 52H kırılım bölgesi</label>
-          <label><input type="checkbox" data-scan-condition="momentum"> Günlük momentum</label>
+          <label><input type="checkbox" data-scan-condition="trend" checked> Trend</label>
+          <label><input type="checkbox" data-scan-condition="golden" checked> Golden Cross</label>
+          <label><input type="checkbox" data-scan-condition="rsi" checked> RSI</label>
+          <label><input type="checkbox" data-scan-condition="volume" checked> Hacim / Akıllı Para</label>
+          <label><input type="checkbox" data-scan-condition="breakout"> 52H Kırılım</label>
+          <label><input type="checkbox" data-scan-condition="momentum"> Momentum</label>
+          <label><input type="checkbox" data-scan-condition="macd"> MACD</label>
+          <label><input type="checkbox" data-scan-condition="hammer"> Hammer / Doji</label>
+          <label><input type="checkbox" data-scan-condition="adx"> ADX</label>
         </div>
         <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px">
           <button class="btn-primary" onclick="runV38Scanner()">🔎 Taramayı Başlat</button>
@@ -741,15 +755,7 @@ tr:hover td{background:#121b24}.ticker-badge{background:#16212b;border-color:#26
         <div>
           <div class="v9-card"><div class="v9-kpi">Bot Ayarları</div>
             <div class="form-group" style="margin-top:12px"><label>Mod</label><select id="bot-mode"><option value="paper">PAPER — Güvenli Test</option><option value="testnet">BINANCE TESTNET — Emir Testi</option></select></div>
-            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0 12px">
-              <span id="bridge-status" class="v9-chip hold">● iDeal Bridge: KONTROL EDİLİYOR</span>
-              <button class="btn-sm" onclick="checkLiveBridge()">↻ Bağlantıyı Kontrol Et</button>
-            </div>
-            <div class="form-group"><label>LIVE işlem bütçesi (₺)</label><input id="live-budget" type="number" value="2500" min="100" step="100"></div>
-            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
-              <button class="btn-primary" id="live-arm-btn" onclick="armLiveTrading()">🔐 LIVE BOTU AKTİF ET</button>
-              <button class="btn-danger" onclick="disarmLiveTrading()">🔒 LIVE KAPAT</button>
-            </div>
+            <div class="warn-box" style="margin:8px 0 12px"><b>BIST işlemi yok.</b> BIST tarafı yalnızca analiz/sinyal üretir. Bu terminalde işlem motoru sadece Binance Paper/Testnet için ayrılmıştır.</div>
             <div class="form-group"><label>Başlangıç sermayesi (paper)</label><input id="bot-capital" type="number" value="100000" min="1000" step="1000"></div>
             <div class="form-group"><label>İşlem başına maksimum risk %</label><input id="bot-risk" type="number" value="1" min="0.1" max="5" step="0.1"></div>
             <div class="form-group"><label>Maksimum pozisyon %</label><input id="bot-maxpos" type="number" value="10" min="1" max="50" step="1"></div>
@@ -761,7 +767,7 @@ tr:hover td{background:#121b24}.ticker-badge{background:#16212b;border-color:#26
           </div></div>
         </div>
       </div>
-      <div class="warn-box" style="margin-top:14px"><b>Gerçek işlem mimarisi:</b> FurkAI AI kararını üretir → yerel Live Bridge'e gerçek emir isteği bırakır → iDeal User.dll bu isteği iDeal içinden alır → <code>Sistem.EmirGonder()</code> ile aracı kurum hesabına iletir. iDeal'in resmi dokümanı Robot modunda GERÇEK aksiyon ile sinyal oluştuğunda gerçek hesaba emir gönderilebildiğini ve User.DLL ile iDeal sistem nesnesine erişilebildiğini doğruluyor. <span style="opacity:.8">Bu yüzden iDeal + uygun lisans + User.dll kurulumu olmadan LIVE emir gönderilemez.</span></div>
+      <div class="warn-box" style="margin-top:14px"><b>Güvenlik:</b> BIST tarafında otomatik gerçek emir yoktur. Binance tarafında da bu sürüm yalnızca PAPER/TESTNET kullanır; canlı para işlemi kapalıdır.</div>
     </div>
   </div>
 
@@ -1647,7 +1653,7 @@ body.light #sidebar{background:#fff} body.light .panel,body.light .v9-card,body.
       }catch(_){canvas=makeSummaryCanvas();}
     }
     const stamp=new Date().toISOString().replace(/[:.]/g,'-');
-    const meta={version:'V41',page:currentPage,time:new Date().toISOString(),url:location.href,userAgent:navigator.userAgent};
+    const meta={version:'V42',page:currentPage,time:new Date().toISOString(),url:location.href,userAgent:navigator.userAgent};
     const a=document.createElement('a');a.download=`FurkAI-Sorun-${currentPage}-${stamp}.png`;a.href=canvas.toDataURL('image/png');a.click();if(screenshotButton){screenshotButton.dataset.captureState='done';screenshotButton.textContent='📸 SS Hazır ✓';setTimeout(()=>{screenshotButton.textContent='📸 Sorun Bildir / SS Al';},2500);}
   }catch(e){if(screenshotButton){screenshotButton.dataset.captureState='error';screenshotButton.textContent='📸 SS Hatası';}alert('Ekran görüntüsü alınamadı: '+e.message);}
 }
@@ -1685,7 +1691,8 @@ window.onload = () => {
   loadMarketConfig();
   const goldSelect = document.getElementById('f-gold-instrument');
   goldSelect.innerHTML = GOLD_INSTRUMENTS.map(([key,label]) => `<option value="${key}">${label}</option>`).join('');
-  applySeedPositionsV3();
+  // IMPORTANT: never overwrite the user's saved portfolio on startup.
+  // Legacy seed functions are retained only for backwards compatibility and are not executed.
   renderPortfolio();
   startPortfolioAutoRefresh();
   showPage('chat');
@@ -1718,7 +1725,7 @@ function clearV38Scanner(){const el=document.getElementById('scanner-results');i
 function toggleScanModel(card){
   card.classList.toggle('active');
   const model=card.dataset.model;
-  const map={breakout:'breakout',volume:'volume',rsi:'rsi',momentum:'momentum'};
+  const map={golden:'golden',goldcross:'golden',breakout:'breakout',volume:'volume',rsi:'rsi',macd:'macd',hammer:'hammer',adx:'adx',momentum:'momentum'};
   if(map[model]){const cb=document.querySelector(`[data-scan-condition="${map[model]}"]`);if(cb)cb.checked=card.classList.contains('active');}
 }async function runV38Scanner(){const box=document.getElementById('scanner-results'),st=document.getElementById('scanner-status');if(!box)return;const range=document.getElementById('scan-range').value,rsiMax=Number(document.getElementById('scan-rsi').value)||70,volMin=Number(document.getElementById('scan-vol').value)||1.2,minScore=Number(document.getElementById('scan-score').value)||60;st.className='v9-chip hold';st.textContent='● Tarıyor…';box.innerHTML='<div style="padding:24px;color:var(--text3)">Veriler alınıyor…</div>';let out=[],errors=0;const universe=(await fetch('/api/bist/universe',{signal:AbortSignal.timeout(15000)}).then(r=>r.json()).catch(()=>null))?.symbols||V38_SCAN_SYMBOLS;for(const sym of [...new Set(universe)].slice(0,Number(document.getElementById('scan-limit')?.value||650))){try{const d=await v38Fetch(sym,range);if(d.c.length<60)continue;const last=d.c.at(-1),rsi=v38Rsi(d.c),e20=v38Ema(d.c.slice(-80),20),e50=v38Ema(d.c.slice(-100),50),avgV=d.v.slice(-20).reduce((a,b)=>a+b,0)/Math.max(1,d.v.slice(-20).length),vr=d.v.at(-1)/Math.max(1,avgV);let score=0; if(last>e20)score+=20;if(e20>e50)score+=20;if(rsi!==null&&rsi<rsiMax)score+=15;if(vr>=volMin)score+=20;const hi=Math.max(...d.c.slice(-252));if(last>=hi*0.95)score+=15;if(last>d.c.at(-2))score+=10;if(score>=minScore)out.push({sym,last,rsi,vr,score,trend:last>e20&&e20>e50?'Yükseliş':'Karışık'});}catch(e){errors++;}}out.sort((a,b)=>b.score-a.score);if(!out.length){box.innerHTML='<div style="padding:24px;color:var(--text3)">Uygun sonuç bulunamadı. Bu bir hata değildir; veri alınamayan semboller sonuçlara eklenmedi.</div>';}else{box.innerHTML='<table style="width:100%;border-collapse:collapse"><thead><tr><th style="padding:12px;text-align:left">Hisse</th><th>Fiyat</th><th>RSI</th><th>Hacim</th><th>Trend</th><th>FurkAI Ön Skor</th></tr></thead><tbody>'+out.map(x=>`<tr><td style="padding:12px;font-weight:700">${x.sym}</td><td>${x.last.toFixed(2)}</td><td>${x.rsi?.toFixed(1)??'—'}</td><td>${x.vr.toFixed(2)}x</td><td>${x.trend}</td><td><b>${x.score}/100</b></td></tr>`).join('')+'</tbody></table>';}st.className='v9-chip '+(out.length?'buy':'hold');st.textContent=`● ${out.length} aday · ${errors} veri hatası`;}
 function showPage(page) {
@@ -2551,50 +2558,47 @@ async function fetchPositionPrice(p) {
 
 async function refreshPrices() {
   if (!portfolio.length) { renderCharts(); return; }
-  document.getElementById('price-status').textContent = '⏳ Fiyatlar güncelleniyor...';
+  const statusEl=document.getElementById('price-status');
+  if(statusEl) statusEl.textContent='⏳ Piyasa verileri güvenilir sunucudan yenileniyor…';
   document.getElementById('live-badge')?.classList.add('loading');
-  goldDataCache = null; goldDataSource = null; // her manuel yenilemede altın verisini de tazele
-
-  const uniqueKeys = [...new Set(portfolio.map(p => p.type + '::' + p.symbol))];
-  const failed = [];
-
-  await Promise.all(uniqueKeys.map(async key => {
-    const [type, symbol] = key.split('::');
-    const sample = portfolio.find(p => p.type === type && p.symbol === symbol);
-    try {
-      const quote = await fetchPositionPrice(sample);
-      const price = quote?.price ?? quote;
-      portfolio.forEach(p => {
-        if (p.type === type && p.symbol === symbol) {
-          p.currentPrice = price;
-          if (quote?.dailyChange != null) p.dailyChange = quote.dailyChange * p.qty;
-          if (quote?.dailyChangePct != null) p.dailyChangePct = quote.dailyChangePct;
-          p.priceTimestamp = quote?.timestamp || Date.now();
-          p.priceIsManual = false;
-        }
-      });
-    } catch (e) {
-      failed.push(sample.label || symbol);
-    }
-  }));
-
-  savePortfolio();
-  renderPortfolio();
-  const now = new Date();
-  const statusEl = document.getElementById('price-status');
-  const goldNote = goldDataSource ? ` · Altın kaynağı: ${goldDataSource === 'harem' ? 'Harem İstanbul (canlı)' : 'Truncgil (serbest piyasa, Harem yedeği)'}` : '';
-  if (failed.length === uniqueKeys.length) {
-    statusEl.textContent = `⚠ Fiyatlar alınamadı (${now.toLocaleTimeString('tr-TR')}) — bağlantını veya sembolü kontrol et: ${failed.join(', ')}`;
-  } else if (failed.length) {
-    statusEl.textContent = `✓ ${now.toLocaleTimeString('tr-TR')} güncellendi — alınamayan: ${failed.join(', ')}${goldNote}`;
-  } else {
-    statusEl.textContent = `✓ ${now.toLocaleTimeString('tr-TR')} güncellendi${goldNote}`;
+  goldDataCache=null; goldDataSource=null;
+  const stockSymbols=[...new Set(portfolio.filter(p=>p.type==='Hisse').map(p=>p.symbol))];
+  const failed=[]; let stockData={};
+  if(stockSymbols.length){
+    try{
+      const r=await fetch('/api/quotes?symbols='+encodeURIComponent(stockSymbols.join(',')),{signal:AbortSignal.timeout(30000)});
+      const d=await r.json();
+      if(!r.ok||!d.ok) throw new Error(d.error||'Piyasa servisi yanıt vermedi');
+      stockData=d.quotes||{};
+      (d.errors||[]).forEach(x=>failed.push(x.symbol));
+    }catch(e){stockSymbols.forEach(s=>failed.push(s));}
   }
-  document.getElementById('last-update').textContent = `Son güncelleme: ${now.toLocaleTimeString('tr-TR')}`;
+  for(const p of portfolio){
+    if(p.type==='Hisse'){
+      const q=stockData[p.symbol]||stockData[p.symbol.replace(/^([^.]*)$/, '$1.IS')];
+      if(q&&Number.isFinite(Number(q.price))&&Number(q.price)>0){
+        p.currentPrice=Number(q.price); p.priceTimestamp=q.marketTimestamp?Number(q.marketTimestamp)*1000:Date.now(); p.priceIsManual=false;
+        if(q.dailyChange!=null) p.dailyChange=Number(q.dailyChange)*p.qty;
+        if(q.dailyChangePct!=null) p.dailyChangePct=Number(q.dailyChangePct);
+        p.dataSource=q.source; p.dataAgeSeconds=q.ageSeconds; p.dataStale=!!q.stale; p.dataWarning=q.warning||'';
+      }
+    }
+  }
+  // Gold continues to use its dedicated provider/fallback.
+  for(const p of portfolio.filter(x=>x.type==='Altın')){
+    try{const q=await fetchPositionPrice(p);if(Number(q.price)>0){p.currentPrice=Number(q.price);p.priceTimestamp=q.timestamp||Date.now();p.priceIsManual=false;}}catch(e){failed.push(p.label||p.symbol);}
+  }
+  savePortfolio(); renderPortfolio();
+  const now=new Date(); const allSymbols=stockSymbols.length+portfolio.filter(p=>p.type==='Altın').length;
+  if(statusEl){
+    if(!allSymbols) statusEl.textContent='Portföy boş';
+    else if(failed.length===allSymbols) statusEl.textContent=`⚠ Veri alınamadı · ${now.toLocaleTimeString('tr-TR')}`;
+    else if(failed.length) statusEl.textContent=`✓ ${now.toLocaleTimeString('tr-TR')} · ${failed.length} sembol alınamadı`;
+    else statusEl.textContent=`✓ ${now.toLocaleTimeString('tr-TR')} · ${stockSymbols.length} BIST fiyatı güncellendi`;
+  }
+  document.getElementById('last-update').textContent=`Son veri kontrolü: ${now.toLocaleTimeString('tr-TR')}`;
   document.getElementById('live-badge')?.classList.remove('loading');
-
-  recordHistorySnapshot();
-  renderCharts();
+  recordHistorySnapshot(); renderCharts();
 }
 
 function recordHistorySnapshot() {
@@ -2935,7 +2939,7 @@ let tvWidgetInstance = null;
 function renderTradingViewChart(symbol, intervalOverride) {
   const container = document.getElementById('tv-chart-container') || document.getElementById('analysis-tv');
   if (!container) return;
-  if (typeof TradingView === 'undefined' || !TradingView.widget) {
+  if (!window.TradingView || typeof window.TradingView.widget !== 'function') {
     container.innerHTML = '<div class="mini-note" style="height:100%;display:flex;align-items:center;justify-content:center;text-align:center">📈 Grafik veri bağlantısı şu anda kapalı.<br><span style="opacity:.7">Canlı BIST grafik/veri sağlayıcısı bağlandığında grafik burada açılır.</span></div>';
     return;
   }
@@ -3078,14 +3082,17 @@ function genSignalsMACD(prices, fast, slow, signal) {
 
 // ── Backtest motoru (vbt.Portfolio.from_signals eşdeğeri — tam pozisyon, %0.1 komisyon) ──
 function runSignalBacktest(prices, entries, exits, initCash = 10000, fee = 0.001) {
+  // Anti-lookahead: a signal observed on bar i is executed on the next available bar.
   let cash = initCash, shares = 0, inPos = false, entryPrice = 0, entryIdx = -1;
   const equity = [], trades = [], markers = { buy: [], sell: [] };
   for (let i = 0; i < prices.length; i++) {
     const price = prices[i];
-    if (!inPos && entries[i]) {
+    const buyNow = i > 0 && entries[i - 1];
+    const sellNow = i > 0 && exits[i - 1];
+    if (!inPos && buyNow) {
       shares = (cash * (1 - fee)) / price; cash = 0; inPos = true; entryPrice = price; entryIdx = i;
       markers.buy.push(i);
-    } else if (inPos && exits[i]) {
+    } else if (inPos && sellNow) {
       cash = shares * price * (1 - fee);
       trades.push({ entryIdx, exitIdx: i, entryPrice, exitPrice: price, pnlPct: (price / entryPrice - 1) * 100 });
       shares = 0; inPos = false; markers.sell.push(i);

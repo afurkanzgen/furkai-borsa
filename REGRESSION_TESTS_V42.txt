@@ -1,0 +1,25 @@
+FurkAI V42 regression check
+
+Static checks
+- server.py Python syntax: PASS
+- index.html JavaScript syntax (Node --check): PASS
+- Render PORT binding: PASS
+- /api/health: PASS (V42 Unified)
+- HEAD request: PASS (200)
+- portfolio seed auto-overwrite on startup: DISABLED
+- TradingView null guard: PASS
+- BIST iDeal live-order UI: REMOVED / BIST remains signal-only
+- Binance mode: PAPER / TESTNET only
+
+Backtest engine regression (5 deterministic market regimes)
+1) Rising trend: PASS (no NaN/Infinity; 0 trades because no crossover event)
+2) Falling trend: PASS (no NaN/Infinity; 0 trades)
+3) Sideways: PASS (-20.36% return, 22.77% max DD, 10 trades)
+4) Volatile oscillation: PASS (+40.37% return, 12.88% max DD, 5 trades)
+5) Regime change: PASS (no NaN/Infinity; 0 trades)
+
+Important limitation
+The execution environment has no external DNS/network access, so live Yahoo/BIST requests could not be validated against the internet here. The V42 server now fails closed: if market data is unavailable it returns an explicit error and does not manufacture 0 prices or fake scan results.
+
+Backtest anti-lookahead
+Signals generated on bar i are executed on the next available bar in the browser backtest engine.
