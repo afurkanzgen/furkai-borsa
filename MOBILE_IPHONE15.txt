@@ -1,0 +1,10 @@
+FurkAI iPhone 15 Kullanımı
+
+1) Bilgisayarda start.bat dosyasını çalıştır.
+2) CMD ekranında 'Telefon (ayni Wi-Fi): http://192.168.x.x:8798/' benzeri adresi bul.
+3) iPhone 15 Safari'yi aç ve bu adresi yaz.
+4) Telefon ve bilgisayar aynı Wi-Fi ağında olmalı.
+5) Windows Güvenlik Duvarı Python'a izin sorarsa Özel ağlarda izin ver.
+6) İstersen Safari Paylaş > Ana Ekrana Ekle ile FurkAI'yi uygulama gibi kullanabilirsin.
+
+Not: Bu yerel ağ erişimidir. İnternet üzerinden her yerden erişim için ayrıca güvenli sunucu/HTTPS kurulumu gerekir.

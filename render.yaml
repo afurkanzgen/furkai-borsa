@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: furkai-borsa
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    healthCheckPath: /api/health
+    envVars:
+      - key: FURKAI_USER
+        value: furkai
+      - key: FURKAI_PASSWORD
+        sync: false

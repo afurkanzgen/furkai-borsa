@@ -1,0 +1,14 @@
+FurkAI V41 - Render deployment
+
+1. Push the contents of this folder to the GitHub repository root.
+2. In Render: New + -> Web Service -> connect the GitHub repository.
+3. Build command: pip install -r requirements.txt
+4. Start command: python server.py
+5. Health check: /api/health
+6. Set FURKAI_PASSWORD in Render Environment. Do not commit it.
+7. Render provides the public HTTPS URL.
+
+Security:
+- Basic Auth is enabled when FURKAI_PASSWORD is set.
+- Do not commit config.json, API secrets, or .env.
+- Binance remains Testnet/Paper only in this package.
