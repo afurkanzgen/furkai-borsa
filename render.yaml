@@ -1,13 +1,15 @@
 services:
   - type: web
-    name: furkai-borsa
+    name: furkai-bist
     runtime: python
-    plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: python server.py
-    healthCheckPath: /api/health
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python server_wsgi.py"
     envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
       - key: FURKAI_USER
-        value: furkai
+        sync: false
       - key: FURKAI_PASSWORD
         sync: false
+      - key: FURKAI_REQUIRE_AUTH
+        value: "1"

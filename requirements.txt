@@ -1,1 +1,3 @@
-requests==2.32.4
+waitress>=3.0,<4
+
+cryptography>=43,<46
