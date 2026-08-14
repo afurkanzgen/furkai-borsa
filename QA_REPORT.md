@@ -1,21 +1,29 @@
-# FurkAI V15.0 — 10x Furkan Loop QA
+# FurkAI BIST V15.0 — Final QA
 
-Her turda: hata kontrolü → eksik tespiti → geliştirme/düzeltme → tekrar kontrol.
+## 10x QA loop
+1. Re-check → found invalid JavaScript (`async async async async`). Fixed.
+2. Re-check → WSGI lacked HEAD support. Fixed root/static/API public HEAD handling.
+3. Re-check → regression tests expected old WSGI strings. Updated tests and added HEAD/JS regression coverage.
+4. Re-check → live local HTTP smoke test: HEAD/GET root and health all 200.
+5. Re-check → direct WSGI HEAD/GET smoke test: root, health, config, data-status and PWA assets all pass.
+6. Re-check → PWA/mobile shell inspected: manifest, iPhone icon, service worker and safe-area/mobile rules present.
+7. Re-check → duplicate JS functions and scanner model inventory checked; 27 models present.
+8. Re-check → secret/key storage and unsafe dynamic HTML insertion checked; Gemini key is encrypted and no plaintext key is bundled.
+9. Re-check → Render deployment config hardened: WSGI start command, `/api/health` health check, and `FURKAI_SECRET_KEY` environment variable.
+10. Final re-check → clean release package, Python compile, JS syntax, full regression suite, ZIP integrity, and no bundled secret/runtime artifacts.
 
-1. **Sürüm/konfigürasyon:** 15.0 tek sürüm haline getirildi; 14.8 artıkları temizlendi. PASS
-2. **Frontend kaynakları:** Eski `app.js` kaldırıldı; tüm gerekli fonksiyonlar tek `index.html` kaynağına taşındı. PASS
-3. **QA/test altyapısı:** Eski app.js referansları ve yanlış markup beklentileri düzeltildi. PASS
-4. **Grafik çizim araçları:** Yatay çizgi, trend çizgisi, Fibonacci ve çizimleri temizleme eklendi; JS sözdizimi kontrol edildi. PASS
-5. **Grafik yenileme:** Otomatik yenileme ayarlara bağlandı; refresh süresi ve aç/kapat durumu işlendi. PASS
-6. **AI UX:** Tarama AI sonucu aynı panelde açılıyor; kayan/üst üste eklenen AI kartı davranışı kaldırıldı. PASS
-7. **Hisse Tarama:** AND/OR, min model, hazır stratejiler, model filtreleme, temizleme ve sonuç sıralama akışı kontrol edildi. PASS
-8. **Tema/Ayarlar:** Koyu, açık ve sistem teması; tema ayarının sunucu config'ine kaydı; Gemini ayarları kontrol edildi. PASS
-9. **Veri sağlığı/portföy:** Veri tazeliği, son veri zamanı ve portföy çeşitlendirme/korelasyon özeti geliştirildi. PASS
-10. **Final regression:** Python compile, JavaScript syntax, WSGI, güvenlik/config kontrolleri ve uygulama testleri yeniden çalıştırıldı. **49/49 PASS.** PASS
+## Automated results
+- Regression suite: **51/51 PASS**
+- Python compile: **PASS**
+- JavaScript syntax (`node --check`): **PASS**
+- Local HTTP HEAD/GET smoke test: **PASS**
+- WSGI HEAD/GET smoke test: **PASS**
+- PWA manifest/icon/service worker checks: **PASS**
+- 27 scanner models: **PASS**
+- No duplicate critical JS functions: **PASS**
+- No plaintext Gemini API key bundled: **PASS**
+- No `.furkai_secret` bundled: **PASS**
+- ZIP integrity: **PASS**
 
-## Son güvenlik kontrolleri
-- Paket içinde plaintext Gemini API key bulunmuyor.
-- `.furkai_secret` paketlenmedi; deployment için `FURKAI_SECRET_KEY` kullanılabilir.
-- Eski `app.js` bulunmuyor.
-- 14.8 sürüm artığı bulunmuyor.
-- `aiStock`, `runBacktest`, `loadDashboard`, `setTheme` fonksiyonları tekil.
+## Deployment note
+Render should use `python server_wsgi.py`, health check `/api/health`, and a persistent `FURKAI_SECRET_KEY` environment secret. Never commit a Gemini API key or `.furkai_secret` to GitHub.

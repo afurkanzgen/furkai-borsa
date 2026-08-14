@@ -890,6 +890,41 @@ def auth(h):
         u,p=base64.b64decode(raw[6:]).decode().split(':',1); return hmac.compare_digest(u,USER) and hmac.compare_digest(p,PASSWORD)
     except:return False
 class Handler(BaseHTTPRequestHandler):
+    def do_HEAD(self):
+        # Render, Safari and health checks may probe URLs with HEAD before GET.
+        # Return the same status/headers as GET, but never write a response body.
+        p=urllib.parse.urlparse(self.path)
+        if p.path in ('/','/index.html'):
+            b=(BASE/'index.html').read_bytes()
+            self.send_response(200)
+            self.send_header('Content-Type','text/html; charset=utf-8')
+            self.send_header('Content-Length',str(len(b)))
+            self.end_headers()
+            return
+        if p.path in ('/manifest.webmanifest','/sw.js') or p.path.startswith('/icon-'):
+            fp=BASE/p.path.lstrip('/')
+            if fp.exists() and fp.is_file():
+                ctype='application/manifest+json' if p.path.endswith('.webmanifest') else 'application/javascript' if p.path.endswith('.js') else 'image/png'
+                self.send_response(200)
+                self.send_header('Content-Type',ctype)
+                self.send_header('Content-Length',str(fp.stat().st_size))
+                self.end_headers()
+                return
+        if p.path=='/api/health':
+            payload=json.dumps({'ok':True,'app':'FurkAI BIST','version':DEFAULT.get('app_version','15.0'),'source':'Yahoo Finance/KAP public data'},ensure_ascii=False).encode()
+            self.send_response(200)
+            self.send_header('Content-Type','application/json; charset=utf-8')
+            self.send_header('Content-Length',str(len(payload)))
+            self.end_headers()
+            return
+        if p.path in ('/api/market-regime','/api/config','/api/data-status'):
+            self.send_response(200)
+            self.send_header('Content-Type','application/json; charset=utf-8')
+            self.end_headers()
+            return
+        self.send_response(404)
+        self.end_headers()
+
     def sendj(self,o,status=200):
         b=json.dumps(o,ensure_ascii=False).encode(); self.send_response(status); self.send_header('Content-Type','application/json; charset=utf-8'); self.send_header('Content-Length',str(len(b))); self.end_headers(); self.wfile.write(b)
     def do_GET(self):

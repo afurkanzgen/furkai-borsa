@@ -18,15 +18,36 @@ def _json(start_response, payload, status='200 OK'):
 def app(environ, start_response):
     path=environ.get('PATH_INFO','/')
     method=environ.get('REQUEST_METHOD','GET').upper()
-    if path in ('/','/index.html') and method=='GET':
+    if path in ('/','/index.html') and method in ('GET','HEAD'):
         body=(BASE/'index.html').read_bytes()
         start_response('200 OK',[('Content-Type','text/html; charset=utf-8'),('Content-Length',str(len(body)))])
-        return [body]
-    if path=='/api/health' and method=='GET':
-        return _json(start_response, {'ok':True,'app':'FurkAI BIST','version':server.DEFAULT.get('app_version','15.0'),'source':'Yahoo Finance/KAP public data'})
-    if path=='/api/config' and method=='GET':
+        return [body] if method=='GET' else [b'']
+    if method=='HEAD':
+        static = {
+            '/manifest.webmanifest': ('application/manifest+json', BASE/'manifest.webmanifest'),
+            '/sw.js': ('application/javascript', BASE/'sw.js'),
+            '/icon-180.png': ('image/png', BASE/'icon-180.png'),
+            '/icon-512.png': ('image/png', BASE/'icon-512.png'),
+        }
+        if path in static and static[path][1].exists():
+            ctype, fp = static[path]
+            start_response('200 OK',[('Content-Type',ctype),('Content-Length',str(fp.stat().st_size))])
+            return [b'']
+    if path=='/api/health' and method in ('GET','HEAD'):
+        payload={'ok':True,'app':'FurkAI BIST','version':server.DEFAULT.get('app_version','15.0'),'source':'Yahoo Finance/KAP public data'}
+        if method=='HEAD':
+            start_response('200 OK',[('Content-Type','application/json; charset=utf-8')])
+            return [b'']
+        return _json(start_response, payload)
+    if path=='/api/config' and method in ('GET','HEAD'):
+        if method=='HEAD':
+            start_response('200 OK',[('Content-Type','application/json; charset=utf-8')])
+            return [b'']
         return _json(start_response, server.public_config())
-    if path=='/api/data-status' and method=='GET':
+    if path=='/api/data-status' and method in ('GET','HEAD'):
+        if method=='HEAD':
+            start_response('200 OK',[('Content-Type','application/json; charset=utf-8')])
+            return [b'']
         return _json(start_response, server.data_status())
     if path.startswith('/api/') and not server.auth(_auth_headers(environ)):
         return _json(start_response, {'ok':False,'error':'Kimlik doğrulama gerekli'}, '401 Unauthorized')

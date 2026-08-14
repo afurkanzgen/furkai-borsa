@@ -497,9 +497,23 @@ def test_frontend_settings_page_and_single_backtest_function():
 
 def test_wsgi_has_config_and_data_status_routes():
     src=open('server_wsgi.py',encoding='utf-8').read()
-    assert "path=='/api/config' and method=='GET'" in src
-    assert "path=='/api/data-status' and method=='GET'" in src
+    assert "path=='/api/config' and method in ('GET','HEAD')" in src
+    assert "path=='/api/data-status' and method in ('GET','HEAD')" in src
     assert "path=='/api/portfolio/intelligence'" in src
+
+
+def test_wsgi_head_support_for_root_and_health():
+    src=open('server_wsgi.py',encoding='utf-8').read()
+    assert "method in ('GET','HEAD')" in src
+    assert "if method=='HEAD'" in src
+    assert "/api/health" in src
+
+
+def test_frontend_has_no_obvious_async_duplication():
+    html=open('index.html',encoding='utf-8').read()
+    assert 'async async' not in html
+    assert html.count('async function aiStock(){')==1
+    assert html.count('async function runBacktest(){')==1
 
 
 def test_backtest_exposes_benchmark_and_buy_hold_curves():

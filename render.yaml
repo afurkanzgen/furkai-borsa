@@ -4,6 +4,7 @@ services:
     runtime: python
     buildCommand: "pip install -r requirements.txt"
     startCommand: "python server_wsgi.py"
+    healthCheckPath: /api/health
     envVars:
       - key: PYTHON_VERSION
         value: "3.11.9"
@@ -13,3 +14,5 @@ services:
         sync: false
       - key: FURKAI_REQUIRE_AUTH
         value: "1"
+      - key: FURKAI_SECRET_KEY
+        sync: false
