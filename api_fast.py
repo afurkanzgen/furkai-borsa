@@ -14,7 +14,9 @@ from backtest_engine import BacktestEngine
 
 BASE=Path(__file__).resolve().parent
 app=FastAPI(title='FurkAI BIST', version=server.APP_VERSION)
-app.add_middleware(CORSMiddleware, allow_origins=['*'], allow_methods=['*'], allow_headers=['*'])
+_origins=[x.strip() for x in os.getenv('FURKAI_ALLOWED_ORIGINS','').split(',') if x.strip()]
+if not _origins: _origins=['http://localhost','http://127.0.0.1']
+app.add_middleware(CORSMiddleware, allow_origins=_origins, allow_methods=['GET','POST','OPTIONS'], allow_headers=['Authorization','Content-Type'], allow_credentials=False)
 
 RATE_LIMIT=int(os.getenv('FURKAI_RATE_LIMIT','120'))
 WINDOW=60
@@ -39,14 +41,14 @@ def payload(request: Request):
 
 @app.get('/')
 @app.get('/index.html')
-async def index(): return FileResponse(BASE/'index.html',media_type='text/html')
+async def index(): return FileResponse(BASE/'index.html',media_type='text/html',headers={'Cache-Control':'no-store, max-age=0'})
 
 @app.get('/manifest.webmanifest')
-async def manifest(): return FileResponse(BASE/'manifest.webmanifest',media_type='application/manifest+json')
+async def manifest(): return FileResponse(BASE/'manifest.webmanifest',media_type='application/manifest+json',headers={'Cache-Control':'no-store, max-age=0'})
 @app.get('/sw.js')
-async def sw(): return FileResponse(BASE/'sw.js',media_type='application/javascript')
+async def sw(): return FileResponse(BASE/'sw.js',media_type='application/javascript',headers={'Cache-Control':'no-store, max-age=0'})
 @app.get('/app.js')
-async def app_js(): return FileResponse(BASE/'app.js',media_type='text/javascript')
+async def app_js(): return FileResponse(BASE/'app.js',media_type='text/javascript',headers={'Cache-Control':'no-store, max-age=0'})
 @app.get('/icon-180.png')
 @app.get('/icon-512.png')
 async def icon(request: Request): return FileResponse(BASE/request.url.path.lstrip('/'))
@@ -88,7 +90,7 @@ async def api_get(path: str, request: Request):
     user=payload(request)
     q=request.query_params
     try:
-        if path=='health': return server.public_config() | {'ok':True,'app':'FurkAI BIST'}
+        if path=='health': return server.public_config() | {'ok':True,'app':'FurkAI BIST','storage':server.storage_status()}
         if path=='config': return server.public_config(user)
         if path=='data-status': return server.data_status()
         if path=='market-regime': return server.market_regime()

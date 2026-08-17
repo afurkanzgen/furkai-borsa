@@ -3,6 +3,12 @@ from dotenv import load_dotenv
 load_dotenv()
 from notification_service import service as NOTIFY
 import urllib.parse, urllib.request, threading, sqlite3, hmac, base64, re, stat
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except Exception:
+    psycopg=None
+    dict_row=None
 from datetime import datetime, time as dt_time
 from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -17,6 +23,10 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 SEED_DB=BASE/'furkai_bist.db'
 SEED_CFG=BASE/'config.json'
 CFG=DATA_DIR/'config.json'; DB=DATA_DIR/'furkai_bist.db'; LOG=DATA_DIR/'furkai_bist.log'; SECRET_FILE=DATA_DIR/'.furkai_secret'
+DATABASE_URL=os.environ.get('DATABASE_URL','').strip()
+DB_BACKEND='postgres' if DATABASE_URL else 'sqlite'
+_DB_SCHEMA_LOCK=threading.RLock()
+_DB_SCHEMA_READY=False
 
 # On Render, /var/data is a persistent disk. On first boot it is empty, so
 # seed the packaged example database/config into the persistent directory.
@@ -48,7 +58,7 @@ def _decrypt_key(value):
 def _encrypt_key(value):
     return 'enc:'+_fernet().encrypt(str(value).encode()).decode() if value else ''
 
-APP_VERSION='15.9.7'
+APP_VERSION='15.9.8'
 DEFAULT={'gemini_key':'','gemini_model':'gemini-3.6-flash','scanner_limit':250,'default_period':'1y','default_interval':'1d','refresh_seconds':15,'auto_refresh':True,'theme':'dark','app_version':APP_VERSION}
 if CFG.exists():
     try: DEFAULT.update(json.loads(CFG.read_text(encoding='utf-8')))
@@ -79,25 +89,66 @@ INITIAL_PORTFOLIO=[
 PBKDF2_ITERATIONS=310000
 SESSION_DAYS=7
 
+def _pg_conn():
+    if psycopg is None: raise RuntimeError('DATABASE_URL ayarlı ancak psycopg kurulu değil')
+    return psycopg.connect(DATABASE_URL, sslmode='require', row_factory=dict_row, connect_timeout=10)
+
+class _DBConn:
+    def __init__(self, conn, postgres=False):
+        self.conn=conn; self.postgres=postgres
+        if not postgres: self.conn.row_factory=sqlite3.Row
+    def execute(self, sql, params=()):
+        if self.postgres: sql=sql.replace('?', '%s')
+        return self.conn.execute(sql, params)
+    def executemany(self, sql, seq):
+        if self.postgres: sql=sql.replace('?', '%s')
+        return self.conn.executemany(sql, seq)
+    def commit(self): self.conn.commit()
+    def rollback(self): self.conn.rollback()
+    def close(self): self.conn.close()
+
+def _ensure_schema(c):
+    global _DB_SCHEMA_READY
+    if _DB_SCHEMA_READY: return
+    with _DB_SCHEMA_LOCK:
+        if _DB_SCHEMA_READY: return
+        if c.postgres:
+            c.execute("CREATE TABLE IF NOT EXISTS users(id BIGSERIAL PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, password_salt TEXT NOT NULL, is_admin INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1, created_at DOUBLE PRECISION NOT NULL, last_login DOUBLE PRECISION)")
+            c.execute("CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at DOUBLE PRECISION NOT NULL, expires_at DOUBLE PRECISION NOT NULL)")
+            c.execute("CREATE TABLE IF NOT EXISTS portfolio(id BIGINT PRIMARY KEY, symbol TEXT NOT NULL, label TEXT, qty DOUBLE PRECISION NOT NULL, cost DOUBLE PRECISION NOT NULL, note TEXT DEFAULT '', user_id BIGINT REFERENCES users(id) ON DELETE CASCADE)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_portfolio_user ON portfolio(user_id)")
+            c.execute("CREATE TABLE IF NOT EXISTS portfolio_history(ts DOUBLE PRECISION, value DOUBLE PRECISION, cost DOUBLE PRECISION, pnl DOUBLE PRECISION, user_id BIGINT REFERENCES users(id) ON DELETE CASCADE)")
+            c.execute("CREATE TABLE IF NOT EXISTS signal_history(id BIGSERIAL PRIMARY KEY, ts DOUBLE PRECISION NOT NULL, symbol TEXT NOT NULL, models TEXT NOT NULL, entry DOUBLE PRECISION NOT NULL, score DOUBLE PRECISION NOT NULL, ret_1d DOUBLE PRECISION, ret_5d DOUBLE PRECISION, ret_20d DOUBLE PRECISION)")
+        else:
+            c.execute("CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, password_salt TEXT NOT NULL, is_admin INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL, last_login REAL)")
+            c.execute("CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, created_at REAL NOT NULL, expires_at REAL NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE)")
+            c.execute("CREATE TABLE IF NOT EXISTS portfolio(id INTEGER PRIMARY KEY, symbol TEXT NOT NULL, label TEXT, qty REAL NOT NULL, cost REAL NOT NULL, note TEXT DEFAULT '', user_id INTEGER)")
+            pcols={r[1] for r in c.execute('PRAGMA table_info(portfolio)')}
+            if 'user_id' not in pcols: c.execute('ALTER TABLE portfolio ADD COLUMN user_id INTEGER')
+            c.execute("CREATE INDEX IF NOT EXISTS idx_portfolio_user ON portfolio(user_id)")
+            c.execute("CREATE TABLE IF NOT EXISTS portfolio_history(ts REAL, value REAL, cost REAL, pnl REAL, user_id INTEGER)")
+            hcols={r[1] for r in c.execute('PRAGMA table_info(portfolio_history)')}
+            if 'user_id' not in hcols: c.execute('ALTER TABLE portfolio_history ADD COLUMN user_id INTEGER')
+            c.execute("CREATE TABLE IF NOT EXISTS signal_history(id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, symbol TEXT NOT NULL, models TEXT NOT NULL, entry REAL NOT NULL, score REAL NOT NULL)")
+            cols={r[1] for r in c.execute('PRAGMA table_info(signal_history)')}
+            for name in ('ret_1d','ret_5d','ret_20d'):
+                if name not in cols: c.execute(f'ALTER TABLE signal_history ADD COLUMN {name} REAL')
+        c.commit()
+        if '_bootstrap_admin_if_configured' in globals():
+            _bootstrap_admin_if_configured(c)
+            c.commit()
+        _DB_SCHEMA_READY=True
+
 def db():
-    c=sqlite3.connect(DB,timeout=10); c.row_factory=sqlite3.Row
-    c.execute('''CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, password_salt TEXT NOT NULL, is_admin INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL, last_login REAL)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, created_at REAL NOT NULL, expires_at REAL NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS portfolio(id INTEGER PRIMARY KEY, symbol TEXT NOT NULL, label TEXT, qty REAL NOT NULL, cost REAL NOT NULL, note TEXT DEFAULT '', user_id INTEGER)''')
-    pcols={r[1] for r in c.execute('PRAGMA table_info(portfolio)')}
-    if 'user_id' not in pcols:
-        c.execute('ALTER TABLE portfolio ADD COLUMN user_id INTEGER')
-    c.execute('''CREATE INDEX IF NOT EXISTS idx_portfolio_user ON portfolio(user_id)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS portfolio_history(ts REAL, value REAL, cost REAL, pnl REAL, user_id INTEGER)''')
-    hcols={r[1] for r in c.execute('PRAGMA table_info(portfolio_history)')}
-    if 'user_id' not in hcols:
-        c.execute('ALTER TABLE portfolio_history ADD COLUMN user_id INTEGER')
-    c.execute('''CREATE TABLE IF NOT EXISTS signal_history(id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, symbol TEXT NOT NULL, models TEXT NOT NULL, entry REAL NOT NULL, score REAL NOT NULL)''')
-    cols={r[1] for r in c.execute('PRAGMA table_info(signal_history)')}
-    for name in ('ret_1d','ret_5d','ret_20d'):
-        if name not in cols: c.execute(f'ALTER TABLE signal_history ADD COLUMN {name} REAL')
-    _bootstrap_admin_if_configured(c) if '_bootstrap_admin_if_configured' in globals() else None
-    c.commit(); return c
+    if DB_BACKEND=='postgres':
+        c=_DBConn(_pg_conn(),True); _ensure_schema(c); return c
+    c=_DBConn(sqlite3.connect(DB,timeout=10),False); _ensure_schema(c); return c
+
+def storage_status():
+    if DB_BACKEND!='postgres': return {'backend':'sqlite','connected':DB.exists(),'persistent':DATA_DIR!=BASE}
+    try:
+        c=db(); c.execute('SELECT 1'); c.close(); return {'backend':'postgres','connected':True,'persistent':True}
+    except Exception as e: return {'backend':'postgres','connected':False,'persistent':True,'error':str(e)}
 
 def _hash_password(password, salt=None):
     if not isinstance(password,str) or len(password)<8: raise ValueError('Şifre en az 8 karakter olmalı')
@@ -115,43 +166,48 @@ def _verify_password(password, salt_hex, digest_hex):
 def _user_row(user_id):
     c=db(); row=c.execute('SELECT id,username,is_admin,active,created_at,last_login FROM users WHERE id=?',(int(user_id),)).fetchone(); c.close(); return dict(row) if row else None
 
+def _seed_demo_portfolio(c, uid, only_if_empty=True):
+    if only_if_empty and int(c.execute('SELECT COUNT(*) FROM portfolio WHERE user_id=?',(int(uid),)).fetchone()[0]): return
+    row=c.execute('SELECT COALESCE(MAX(id),0) AS max_id FROM portfolio').fetchone()
+    max_id=int(row['max_id'] if isinstance(row,dict) else row[0])
+    rows=[]
+    for i,x in enumerate(INITIAL_PORTFOLIO, start=1):
+        rows.append((max_id+i,x['symbol'],x.get('label',''),float(x['qty']),float(x['cost']),x.get('note',''),int(uid)))
+    c.executemany('INSERT INTO portfolio(id,symbol,label,qty,cost,note,user_id) VALUES(?,?,?,?,?,?,?)',rows)
+
 def _bootstrap_admin_if_configured(c):
     if c.execute('SELECT COUNT(*) FROM users').fetchone()[0]: return
-    bootstrap_user=os.getenv('FURKAI_USER','').strip().lower()
-    bootstrap_pass=os.getenv('FURKAI_PASSWORD','')
+    bootstrap_user=os.getenv('FURKAI_USER','').strip().lower(); bootstrap_pass=os.getenv('FURKAI_PASSWORD','')
     if not bootstrap_user or not bootstrap_pass: return
     try:
-        salt,digest=_hash_password(bootstrap_pass)
-        now=time.time()
-        cur=c.execute('INSERT OR IGNORE INTO users(username,password_hash,password_salt,is_admin,active,created_at) VALUES(?,?,?,?,?,?)',(bootstrap_user,digest,salt,1,1,now))
-        uid=int(cur.lastrowid or c.execute('SELECT id FROM users WHERE username=?',(bootstrap_user,)).fetchone()[0])
+        salt,digest=_hash_password(bootstrap_pass); now=time.time()
+        if c.postgres:
+            uid=int(c.execute('INSERT INTO users(username,password_hash,password_salt,is_admin,active,created_at) VALUES(?,?,?,?,?,?) RETURNING id',(bootstrap_user,digest,salt,1,1,now)).fetchone()['id'])
+        else:
+            cur=c.execute('INSERT OR IGNORE INTO users(username,password_hash,password_salt,is_admin,active,created_at) VALUES(?,?,?,?,?,?)',(bootstrap_user,digest,salt,1,1,now)); uid=int(cur.lastrowid or c.execute('SELECT id FROM users WHERE username=?',(bootstrap_user,)).fetchone()[0])
         c.execute('UPDATE portfolio SET user_id=? WHERE user_id IS NULL',(uid,))
         c.execute('UPDATE portfolio_history SET user_id=? WHERE user_id IS NULL',(uid,))
-    except Exception:
-        pass
+        _seed_demo_portfolio(c,uid,True)
+    except Exception: pass
 
 def create_user(username,password):
     username=str(username).strip().lower()
     if not re.fullmatch(r'[a-z0-9_.-]{3,32}',username): raise ValueError('Kullanıcı adı 3-32 karakter; sadece a-z, 0-9, _, . ve - kullanılabilir')
-    salt,digest=_hash_password(password)
-    c=db();
+    salt,digest=_hash_password(password); c=db()
     try:
-        _bootstrap_admin_if_configured(c)
-        count=int(c.execute('SELECT COUNT(*) FROM users').fetchone()[0])
-        is_admin=1 if count==0 else 0
-        now=time.time()
-        cur=c.execute('INSERT INTO users(username,password_hash,password_salt,is_admin,active,created_at) VALUES(?,?,?,?,?,?)',(username,digest,salt,is_admin,1,now))
-        uid=int(cur.lastrowid)
-        # In local development only, the first account may claim the legacy portfolio if it uses FURKAI_USER.
-        if count==0 and os.getenv('FURKAI_REQUIRE_AUTH','0')!='1':
-            c.execute('UPDATE portfolio SET user_id=? WHERE user_id IS NULL',(uid,))
-            c.execute('UPDATE portfolio_history SET user_id=? WHERE user_id IS NULL',(uid,))
-        c.commit()
-        return _user_row(uid)
-    except sqlite3.IntegrityError:
-        c.rollback(); raise ValueError('Bu kullanıcı adı zaten kayıtlı')
-    finally:
-        c.close()
+        _bootstrap_admin_if_configured(c); count=int(c.execute('SELECT COUNT(*) FROM users').fetchone()[0]); is_admin=1 if count==0 else 0; now=time.time()
+        if c.postgres:
+            uid=int(c.execute('INSERT INTO users(username,password_hash,password_salt,is_admin,active,created_at) VALUES(?,?,?,?,?,?) RETURNING id',(username,digest,salt,is_admin,1,now)).fetchone()['id'])
+        else:
+            uid=int(c.execute('INSERT INTO users(username,password_hash,password_salt,is_admin,active,created_at) VALUES(?,?,?,?,?,?)',(username,digest,salt,is_admin,1,now)).lastrowid)
+        _seed_demo_portfolio(c,uid,True); c.commit(); return _user_row(uid)
+    except Exception as e:
+        try: c.rollback()
+        except Exception: pass
+        if isinstance(e,sqlite3.IntegrityError) or e.__class__.__name__ in ('UniqueViolation','IntegrityError'):
+            raise ValueError('Bu kullanıcı adı zaten kayıtlı')
+        raise
+    finally: c.close()
 
 def authenticate_user(username,password):
     c=db(); row=c.execute('SELECT * FROM users WHERE lower(username)=lower(?) AND active=1',(str(username).strip(),)).fetchone();
@@ -226,7 +282,7 @@ def public_config(user=None):
         'app_version':DEFAULT.get('app_version',APP_VERSION),
         'is_admin':bool((user or {}).get('is_admin')),
         'username':(user or {}).get('username',''),
-        'config_path':'config.json','key_storage':'encrypted','secret_source':'FURKAI_SECRET_KEY' if os.environ.get('FURKAI_SECRET_KEY') else 'local secret file'
+        'config_path':'config.json','key_storage':'encrypted','secret_source':'FURKAI_SECRET_KEY' if os.environ.get('FURKAI_SECRET_KEY') else 'local secret file','storage_backend':DB_BACKEND
     }
 
 def save_config(updates):
@@ -1318,5 +1374,12 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:self.sendj({'ok':False,'error':str(e)},500)
 
 def main():
-    db(); port=int(os.environ.get('PORT','8799')); print(f'FurkAI BIST running on :{port}'); ThreadingHTTPServer(('0.0.0.0',port),Handler).serve_forever()
+    port=int(os.environ.get('PORT','8799'))
+    if os.environ.get('DATABASE_URL') or os.environ.get('FURKAI_FORCE_FASTAPI')=='1':
+        import uvicorn
+        from api_fast import app
+        print(f'FurkAI FastAPI running on :{port}')
+        uvicorn.run(app, host='0.0.0.0', port=port)
+        return
+    db(); print(f'FurkAI BIST running on :{port}'); ThreadingHTTPServer(('0.0.0.0',port),Handler).serve_forever()
 if __name__=='__main__':main()
