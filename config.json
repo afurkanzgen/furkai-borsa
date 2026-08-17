@@ -6,6 +6,6 @@
   "default_interval": "1d",
   "refresh_seconds": 15,
   "auto_refresh": true,
-  "app_version": "15.0",
-  "theme": "dark"
+  "theme": "dark",
+  "app_version": "15.9.6"
 }

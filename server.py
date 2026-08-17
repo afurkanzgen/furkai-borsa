@@ -1,14 +1,35 @@
-import json, math, os, time, urllib.parse, urllib.request, threading, sqlite3, hmac, base64, re, stat
+import json, math, os, time, hashlib, secrets
+from dotenv import load_dotenv
+load_dotenv()
+from notification_service import service as NOTIFY
+import urllib.parse, urllib.request, threading, sqlite3, hmac, base64, re, stat
 from datetime import datetime, time as dt_time
 from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
+import shutil
 from cryptography.fernet import Fernet, InvalidToken
 
 BASE=Path(__file__).resolve().parent
-CFG=BASE/'config.json'; DB=BASE/'furkai_bist.db'; LOG=BASE/'furkai_bist.log'; SECRET_FILE=BASE/'.furkai_secret'
+DATA_DIR=Path(os.environ.get('FURKAI_DATA_DIR', str(BASE))).expanduser().resolve()
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+SEED_DB=BASE/'furkai_bist.db'
+SEED_CFG=BASE/'config.json'
+CFG=DATA_DIR/'config.json'; DB=DATA_DIR/'furkai_bist.db'; LOG=DATA_DIR/'furkai_bist.log'; SECRET_FILE=DATA_DIR/'.furkai_secret'
+
+# On Render, /var/data is a persistent disk. On first boot it is empty, so
+# seed the packaged example database/config into the persistent directory.
+# Subsequent boots keep using the persistent copies.
+if DATA_DIR != BASE:
+    if not DB.exists() and SEED_DB.exists():
+        shutil.copy2(SEED_DB, DB)
+    if not CFG.exists() and SEED_CFG.exists():
+        shutil.copy2(SEED_CFG, CFG)
 CACHE={}; CACHE_LOCK=threading.RLock(); TTL=180
+SCAN_CACHE={}; SCAN_CACHE_LOCK=threading.RLock(); SCAN_TTL=180
+PORT_INTEL_CACHE={'ts':0.0,'data':None}; PORT_INTEL_LOCK=threading.RLock(); PORT_INTEL_TTL=120
+DIVIDEND_DASH_CACHE={'ts':0.0,'data':None,'running':False}; DIVIDEND_DASH_LOCK=threading.RLock(); DIVIDEND_DASH_TTL=900
 
 def _fernet():
     raw=os.environ.get('FURKAI_SECRET_KEY','').strip()
@@ -27,11 +48,12 @@ def _decrypt_key(value):
 def _encrypt_key(value):
     return 'enc:'+_fernet().encrypt(str(value).encode()).decode() if value else ''
 
-DEFAULT={'gemini_key':'','gemini_model':'gemini-3.6-flash','scanner_limit':250,'default_period':'1y','default_interval':'1d','refresh_seconds':15,'auto_refresh':True,'theme':'dark','app_version':'15.0'}
+APP_VERSION='15.9.7'
+DEFAULT={'gemini_key':'','gemini_model':'gemini-3.6-flash','scanner_limit':250,'default_period':'1y','default_interval':'1d','refresh_seconds':15,'auto_refresh':True,'theme':'dark','app_version':APP_VERSION}
 if CFG.exists():
     try: DEFAULT.update(json.loads(CFG.read_text(encoding='utf-8')))
     except Exception: pass
-DEFAULT['gemini_key']=_decrypt_key(DEFAULT.get('gemini_key','')); DEFAULT['app_version']='15.0'
+DEFAULT['gemini_key']=_decrypt_key(DEFAULT.get('gemini_key','')); DEFAULT['app_version']=APP_VERSION
 
 BIST_UNIVERSE='''THYAO TUPRS ASELS GARAN AKBNK YKBNK ISCTR BIMAS EREGL KCHOL SAHOL SISE TCELL FROTO TOASO PGSUS TAVHL PETKM HEKTS KOZAL KOZAA ENKAI ARCLK MGROS ULKER SASA ASTOR OYAKC CCOLA DOAS MIATK GESAN GWIND ODAS ALARK ENJSA KRDMD TTKOM VESTL LOGO MAVI SOKM AEFES CIMSA KONTR AKSEN TABGD REEDR AGHOL AGESA AKSA ALBRK ANSGR ASUZU ATATP AYDEM BAGFS BANVT BERA BIZIM BOBET BORLS BOSSA BRISA BRSAN BRYAT BUCIM CANTE CEMAS CLEBI CRFSA DAGI DARDL DEVA DGATE DMSAS DODUR DOKTA DURDO DYOBY EGEEN EGPRO EKGYO EMKEL ENERY ERBOS ESCOM EUHOL EUPWR FENER FORTE GENTS GEREL GLYHO GOZDE GUBRF GYHOL HALKB HDFGS HLGYO HUBVC ICBCT IHLAS IHYAY INDES INFO ISDMR ISFIN ISGYO ISMEN JANTS KARSN KATMR KAYSE KCAER KERVT KFEIN KLGYO KLSER KMPUR KOCMT KORDS KOTON KRDM KRDMA KRDMB KRVGD KSTUR KTSKR KUYAS LIDER LKMNH MACKO MAGEN MAKIM MARGN MARKA MEDTR MEGAP MERIT MHRGY MPARK MRDIY MRGYO NIBAS NTGAZ OBASE OBAMS ORCAY ORGE OSTIM OTKAR OYAKC OZKGY PAPIL PARSN PASEU PATEK PCILT PEKGY PENTA PETUN PKART PNSUT POLHO PRKAB PSGYO QUAGR RALYH RAYSG RODRG RUBNS RUZYE RYGYO SARKY SAYAS SELEC SELGD SKBNK SKYMD SMART SNGYO SNICA SOKM SRVGY SUMAS SURGY TATEN TATGD TAVHL TBORG TCKRC TDGYO TEHOL TEKTU TERA TGSAS TKFEN TKNSA TLMAN TMPOL TOASO TRCAS TRGYO TSKB TSPOR TTKOM TTRAK TUKAS TUPRS TURGG ULKER ULUFA UNLU VAKBN VANGD VBTYZ VERUS VESBE VKFYO VKING YAPRK YATAS YAYLA YEOTK YGGYO YKBNK YKSLN YUNSA ZEDUR ZOREN'''.split()
 BIST_UNIVERSE=[s for s in dict.fromkeys(BIST_UNIVERSE) if s.isalpha() and 3<=len(s)<=6]
@@ -54,47 +76,141 @@ INITIAL_PORTFOLIO=[
 ]
 
 # ---------- persistence ----------
+PBKDF2_ITERATIONS=310000
+SESSION_DAYS=7
+
 def db():
     c=sqlite3.connect(DB,timeout=10); c.row_factory=sqlite3.Row
-    c.execute('''CREATE TABLE IF NOT EXISTS portfolio(id INTEGER PRIMARY KEY, symbol TEXT NOT NULL, label TEXT, qty REAL NOT NULL, cost REAL NOT NULL, note TEXT DEFAULT '')''')
-    c.execute('''CREATE TABLE IF NOT EXISTS portfolio_history(ts REAL, value REAL, cost REAL, pnl REAL)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, password_salt TEXT NOT NULL, is_admin INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1, created_at REAL NOT NULL, last_login REAL)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, created_at REAL NOT NULL, expires_at REAL NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS portfolio(id INTEGER PRIMARY KEY, symbol TEXT NOT NULL, label TEXT, qty REAL NOT NULL, cost REAL NOT NULL, note TEXT DEFAULT '', user_id INTEGER)''')
+    pcols={r[1] for r in c.execute('PRAGMA table_info(portfolio)')}
+    if 'user_id' not in pcols:
+        c.execute('ALTER TABLE portfolio ADD COLUMN user_id INTEGER')
+    c.execute('''CREATE INDEX IF NOT EXISTS idx_portfolio_user ON portfolio(user_id)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS portfolio_history(ts REAL, value REAL, cost REAL, pnl REAL, user_id INTEGER)''')
+    hcols={r[1] for r in c.execute('PRAGMA table_info(portfolio_history)')}
+    if 'user_id' not in hcols:
+        c.execute('ALTER TABLE portfolio_history ADD COLUMN user_id INTEGER')
     c.execute('''CREATE TABLE IF NOT EXISTS signal_history(id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, symbol TEXT NOT NULL, models TEXT NOT NULL, entry REAL NOT NULL, score REAL NOT NULL)''')
-    # Forward-compatible columns for fixed-horizon signal performance.
     cols={r[1] for r in c.execute('PRAGMA table_info(signal_history)')}
     for name in ('ret_1d','ret_5d','ret_20d'):
         if name not in cols: c.execute(f'ALTER TABLE signal_history ADD COLUMN {name} REAL')
+    _bootstrap_admin_if_configured(c) if '_bootstrap_admin_if_configured' in globals() else None
     c.commit(); return c
 
-def load_portfolio():
-    c=db(); rows=[dict(r) for r in c.execute('SELECT * FROM portfolio ORDER BY id')];
-    if not rows and INITIAL_PORTFOLIO:
-        normalized=[]
-        for p in INITIAL_PORTFOLIO:
-            normalized.append((p['id'],p['symbol'],p.get('label',''),float(p['qty']),float(p['cost']),p.get('note','')))
-        c.executemany('INSERT INTO portfolio(id,symbol,label,qty,cost,note) VALUES(?,?,?,?,?,?)',normalized)
-        c.commit(); rows=[dict(r) for r in c.execute('SELECT * FROM portfolio ORDER BY id')]
-    c.close(); return rows
+def _hash_password(password, salt=None):
+    if not isinstance(password,str) or len(password)<8: raise ValueError('Şifre en az 8 karakter olmalı')
+    salt=salt or secrets.token_bytes(16)
+    digest=hashlib.pbkdf2_hmac('sha256',password.encode('utf-8'),salt,PBKDF2_ITERATIONS)
+    return salt.hex(), digest.hex()
 
-def save_portfolio(rows):
+def _verify_password(password, salt_hex, digest_hex):
+    try:
+        digest=hashlib.pbkdf2_hmac('sha256',password.encode('utf-8'),bytes.fromhex(salt_hex),PBKDF2_ITERATIONS).hex()
+        return hmac.compare_digest(digest,digest_hex)
+    except Exception:
+        return False
+
+def _user_row(user_id):
+    c=db(); row=c.execute('SELECT id,username,is_admin,active,created_at,last_login FROM users WHERE id=?',(int(user_id),)).fetchone(); c.close(); return dict(row) if row else None
+
+def _bootstrap_admin_if_configured(c):
+    if c.execute('SELECT COUNT(*) FROM users').fetchone()[0]: return
+    bootstrap_user=os.getenv('FURKAI_USER','').strip().lower()
+    bootstrap_pass=os.getenv('FURKAI_PASSWORD','')
+    if not bootstrap_user or not bootstrap_pass: return
+    try:
+        salt,digest=_hash_password(bootstrap_pass)
+        now=time.time()
+        cur=c.execute('INSERT OR IGNORE INTO users(username,password_hash,password_salt,is_admin,active,created_at) VALUES(?,?,?,?,?,?)',(bootstrap_user,digest,salt,1,1,now))
+        uid=int(cur.lastrowid or c.execute('SELECT id FROM users WHERE username=?',(bootstrap_user,)).fetchone()[0])
+        c.execute('UPDATE portfolio SET user_id=? WHERE user_id IS NULL',(uid,))
+        c.execute('UPDATE portfolio_history SET user_id=? WHERE user_id IS NULL',(uid,))
+    except Exception:
+        pass
+
+def create_user(username,password):
+    username=str(username).strip().lower()
+    if not re.fullmatch(r'[a-z0-9_.-]{3,32}',username): raise ValueError('Kullanıcı adı 3-32 karakter; sadece a-z, 0-9, _, . ve - kullanılabilir')
+    salt,digest=_hash_password(password)
+    c=db();
+    try:
+        _bootstrap_admin_if_configured(c)
+        count=int(c.execute('SELECT COUNT(*) FROM users').fetchone()[0])
+        is_admin=1 if count==0 else 0
+        now=time.time()
+        cur=c.execute('INSERT INTO users(username,password_hash,password_salt,is_admin,active,created_at) VALUES(?,?,?,?,?,?)',(username,digest,salt,is_admin,1,now))
+        uid=int(cur.lastrowid)
+        # In local development only, the first account may claim the legacy portfolio if it uses FURKAI_USER.
+        if count==0 and os.getenv('FURKAI_REQUIRE_AUTH','0')!='1':
+            c.execute('UPDATE portfolio SET user_id=? WHERE user_id IS NULL',(uid,))
+            c.execute('UPDATE portfolio_history SET user_id=? WHERE user_id IS NULL',(uid,))
+        c.commit()
+        return _user_row(uid)
+    except sqlite3.IntegrityError:
+        c.rollback(); raise ValueError('Bu kullanıcı adı zaten kayıtlı')
+    finally:
+        c.close()
+
+def authenticate_user(username,password):
+    c=db(); row=c.execute('SELECT * FROM users WHERE lower(username)=lower(?) AND active=1',(str(username).strip(),)).fetchone();
+    if not row or not _verify_password(password,row['password_salt'],row['password_hash']): c.close(); return None
+    now=time.time(); c.execute('UPDATE users SET last_login=? WHERE id=?',(now,row['id'])); c.commit(); c.close(); return _user_row(row['id'])
+
+def create_session(user_id):
+    raw=secrets.token_urlsafe(32); token_hash=hashlib.sha256(raw.encode()).hexdigest(); now=time.time(); exp=now+SESSION_DAYS*86400
+    c=db(); c.execute('INSERT INTO sessions(token_hash,user_id,created_at,expires_at) VALUES(?,?,?,?)',(token_hash,int(user_id),now,exp)); c.commit(); c.close(); return raw
+
+def session_user(token):
+    if not token: return None
+    token_hash=hashlib.sha256(token.encode()).hexdigest(); now=time.time(); c=db(); row=c.execute('SELECT u.id,u.username,u.is_admin,u.active,u.created_at,u.last_login,s.expires_at FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>? AND u.active=1',(token_hash,now)).fetchone();
+    if row is None:
+        c.close(); return None
+    c.execute('DELETE FROM sessions WHERE expires_at<=?',(now,)); c.commit(); c.close(); return dict(row)
+
+def revoke_session(token):
+    if not token:return
+    token_hash=hashlib.sha256(token.encode()).hexdigest(); c=db(); c.execute('DELETE FROM sessions WHERE token_hash=?',(token_hash,)); c.commit(); c.close()
+
+def auth_user(headers):
+    raw=str(headers.get('Authorization',''))
+    if raw.startswith('Bearer '): return session_user(raw[7:].strip())
+    # Legacy Basic Auth fallback for local/admin deployments.
+    if raw.startswith('Basic '):
+        try:
+            u,p=base64.b64decode(raw[6:]).decode().split(':',1)
+            envu=os.environ.get('FURKAI_USER','furkai'); envp=os.environ.get('FURKAI_PASSWORD','')
+            if envp and hmac.compare_digest(u,envu) and hmac.compare_digest(p,envp):
+                c=db(); row=c.execute('SELECT id,username,is_admin,active,created_at,last_login FROM users WHERE username=?',(envu.lower(),)).fetchone();
+                if row is None:
+                    c.close(); user=create_user(envu,envp); return user
+                c.close(); return dict(row)
+        except Exception:
+            return None
+    return None
+
+def load_portfolio(user_id):
+    if user_id is None: return []
+    c=db(); rows=[dict(r) for r in c.execute('SELECT id,symbol,label,qty,cost,note FROM portfolio WHERE user_id=? ORDER BY id',(int(user_id),))]; c.close(); return rows
+
+def save_portfolio(rows,user_id):
+    if user_id is None: raise PermissionError('Kullanıcı gerekli')
     if not isinstance(rows,list) or len(rows)>200: raise ValueError('Portföy 0-200 pozisyon içermelidir')
     normalized=[]; seen=set()
     for p in rows:
         if not isinstance(p,dict): raise ValueError('Geçersiz portföy kaydı')
         sym=str(p.get('symbol','')).upper().replace('.IS','').strip()
         if not re.fullmatch(r'[A-Z0-9]{3,6}',sym): raise ValueError(f'Geçersiz hisse kodu: {sym}')
-        try:
-            qty=float(p.get('qty')); cost=float(p.get('cost'))
+        try: qty=float(p.get('qty')); cost=float(p.get('cost'))
         except (TypeError,ValueError): raise ValueError('Adet ve maliyet sayısal olmalı')
         if not math.isfinite(qty) or not math.isfinite(cost) or qty<=0 or cost<=0: raise ValueError('Adet ve maliyet pozitif sonlu değerler olmalı')
         pid=int(p.get('id') or int(time.time()*1000))
         if pid in seen: raise ValueError('Portföy kayıt ID değerleri benzersiz olmalı')
-        seen.add(pid)
-        normalized.append((pid,sym+'.IS',str(p.get('label',''))[:120],qty,cost,str(p.get('note',''))[:500]))
-    c=db(); c.execute('DELETE FROM portfolio')
-    c.executemany('INSERT INTO portfolio(id,symbol,label,qty,cost,note) VALUES(?,?,?,?,?,?)',normalized)
-    c.commit(); c.close()
+        seen.add(pid); normalized.append((pid,sym+'.IS',str(p.get('label',''))[:120],qty,cost,str(p.get('note',''))[:500],int(user_id)))
+    c=db(); c.execute('DELETE FROM portfolio WHERE user_id=?',(int(user_id),)); c.executemany('INSERT INTO portfolio(id,symbol,label,qty,cost,note,user_id) VALUES(?,?,?,?,?,?,?)',normalized); c.commit(); c.close()
 
-def public_config():
+def public_config(user=None):
     key=str(DEFAULT.get('gemini_key','') or '')
     return {
         'ok':True,
@@ -107,7 +223,9 @@ def public_config():
         'refresh_seconds':max(5,int(DEFAULT.get('refresh_seconds',15))),
         'auto_refresh':bool(DEFAULT.get('auto_refresh',True)),
         'theme':DEFAULT.get('theme','dark'),
-        'app_version':DEFAULT.get('app_version','15.0'),
+        'app_version':DEFAULT.get('app_version',APP_VERSION),
+        'is_admin':bool((user or {}).get('is_admin')),
+        'username':(user or {}).get('username',''),
         'config_path':'config.json','key_storage':'encrypted','secret_source':'FURKAI_SECRET_KEY' if os.environ.get('FURKAI_SECRET_KEY') else 'local secret file'
     }
 
@@ -135,8 +253,14 @@ def save_config(updates):
     persist=dict(DEFAULT); persist['gemini_key']=_encrypt_key(DEFAULT.get('gemini_key','')); CFG.write_text(json.dumps(persist,ensure_ascii=False,indent=2),encoding='utf-8'); os.chmod(CFG, stat.S_IRUSR|stat.S_IWUSR)
     return public_config()
 
+DATA_STATUS_CACHE={'ts':0.0,'data':None}
+DATA_STATUS_LOCK=threading.Lock()
 def data_status():
-    status={'ok':True,'yahoo':'UNKNOWN','gemini':'CONFIGURED' if DEFAULT.get('gemini_key') else 'NOT_CONFIGURED','last_cache_items':len(CACHE),'version':DEFAULT.get('app_version','15.0')}
+    now=time.time()
+    with DATA_STATUS_LOCK:
+        if DATA_STATUS_CACHE['data'] is not None and now-DATA_STATUS_CACHE['ts'] < 30:
+            return dict(DATA_STATUS_CACHE['data'])
+    status={'ok':True,'yahoo':'UNKNOWN','gemini':'CONFIGURED' if DEFAULT.get('gemini_key') else 'NOT_CONFIGURED','last_cache_items':len(CACHE),'version':DEFAULT.get('app_version',APP_VERSION)}
     try:
         d=yahoo_chart('THYAO','5d','1d')
         status['yahoo']='OK' if d.get('timestamp') else 'EMPTY'
@@ -146,12 +270,40 @@ def data_status():
         status['freshness']='FRESH' if status['data_age_seconds'] is not None and status['data_age_seconds']<300 else 'STALE' if status['data_age_seconds'] is not None else 'UNKNOWN'
     except Exception as e:
         status['yahoo']='ERROR'; status['error']=str(e)
+    with DATA_STATUS_LOCK:
+        DATA_STATUS_CACHE['ts']=time.time(); DATA_STATUS_CACHE['data']=dict(status)
     return status
 
 # ---------- data ----------
 def http_json(url,timeout=15):
     req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0 FurkAI-BIST/1.0','Accept':'application/json'})
     with urllib.request.urlopen(req,timeout=timeout) as r: return json.loads(r.read().decode('utf-8','ignore'))
+
+def stooq_chart(symbol, period='1y', interval='1d'):
+    """Secondary daily-data provider. Stooq is only a fallback; Yahoo remains primary."""
+    if interval != '1d':
+        raise RuntimeError('İkincil sağlayıcı yalnızca günlük veri destekliyor')
+    from datetime import timedelta
+    days_map={'5d':10,'1mo':45,'3mo':120,'6mo':220,'1y':450,'2y':850,'5y':1900,'max':5000}
+    days=days_map.get(period,450); end=datetime.now().date(); start=end-timedelta(days=days)
+    base=str(symbol).strip().upper().replace('.IS','')
+    stooq_symbol=base.lower()+'.tr'
+    url=f'https://stooq.com/q/d/l/?s={urllib.parse.quote(stooq_symbol)}&d1={start:%Y%m%d}&d2={end:%Y%m%d}&i=d'
+    with urllib.request.urlopen(urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0 FurkAI-BIST/1.0'}),timeout=12) as r:
+        text=r.read().decode('utf-8','ignore')
+    lines=[x.strip() for x in text.splitlines() if x.strip()]
+    if len(lines)<3 or lines[0].lower().startswith('no data'): raise RuntimeError('Stooq veri döndürmedi')
+    ts=[]; op=[]; hi=[]; lo=[]; cl=[]; vol=[]
+    for line in lines[1:]:
+        cols=line.split(',')
+        if len(cols)<6: continue
+        try:
+            dt=datetime.strptime(cols[0],'%Y-%m-%d').replace(tzinfo=BIST_TZ)
+            vals=[float(cols[i]) for i in range(1,6)]
+            ts.append(int(dt.timestamp())); op.append(vals[0]); hi.append(vals[1]); lo.append(vals[2]); cl.append(vals[3]); vol.append(vals[4] if math.isfinite(vals[4]) else 0.0)
+        except (ValueError,TypeError): continue
+    if len(cl)<60: raise RuntimeError('Stooq yeterli veri döndürmedi')
+    return {'symbol':base+'.IS','meta':{'regularMarketPrice':cl[-1],'previousClose':cl[-2] if len(cl)>1 else None},'quote':{'open':op,'high':hi,'low':lo,'close':cl,'volume':vol},'timestamp':ts,'events':{},'source':'Stooq (fallback)'}
 
 def yahoo_chart(symbol,period='1y',interval='1d'):
     s=str(symbol).strip().upper(); s=s if (s.endswith('.IS') or s.startswith('^')) else s+'.IS'
@@ -169,7 +321,12 @@ def yahoo_chart(symbol,period='1y',interval='1d'):
             with CACHE_LOCK: CACHE[key]={'ts':now,'data':out}
             return out
         except Exception as e: last=e
-    raise RuntimeError(f'Piyasa verisi alınamadı ({s}): {last}')
+    try:
+        fallback=stooq_chart(s,period,interval)
+        with CACHE_LOCK: CACHE[key]={'ts':now,'data':fallback}
+        return fallback
+    except Exception as fallback_error:
+        raise RuntimeError(f'Piyasa verisi alınamadı ({s}). Birincil Yahoo: {last}; ikincil Stooq: {fallback_error}')
 
 BIST_TZ=ZoneInfo('Europe/Istanbul')
 # Borsa İstanbul Pay Piyasası continuous trading closes at 18:10 on full days.
@@ -282,6 +439,70 @@ def quotes(symbols):
             try: out[s]=f.result()
             except Exception as e: errors.append({'symbol':s,'error':str(e)})
     return {'ok':True,'quotes':out,'errors':errors}
+
+
+DIVIDEND_CANDIDATES = [
+    'TUPRS','GARAN','ISCTR','AKBNK','YKBNK','TCELL','ENJSA','BIMAS','FROTO','TOASO',
+    'EREGL','DOAS','CCOLA','ULKER','AYGAZ','AGESA','TSKB','ANHYT','KCHOL','SAHOL',
+    'PETKM','SOKM','MGROS','TAVHL','VAKBN','HALKB','OTKAR','LOGO','GWIND','CIMSA'
+]
+
+def _dividend_profile(symbol, portfolio_qty=0):
+    # Dividend events are Yahoo-specific; do not fall through to Stooq because
+    # Stooq does not provide the cash-dividend event stream needed here.
+    s=str(symbol).strip().upper(); s=s if s.endswith('.IS') else s+'.IS'
+    u=f'https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(s)}?interval=1d&range=5y&events=div%2Csplits'
+    d=http_json(u,timeout=2)
+    result=(d.get('chart') or {}).get('result') or []
+    if not result: raise RuntimeError('Yahoo temettü verisi yok')
+    r=result[0]; meta=r.get('meta') or {}; events=r.get('events') or {}
+    now=time.time(); cutoff=now-365*24*3600
+    vals=[]; yearly={}
+    for ts,x in (events.get('dividends') or {}).items():
+        try:
+            t=int(ts); amount=float(x.get('amount'))
+            if not math.isfinite(amount) or amount<=0: continue
+            date=datetime.fromtimestamp(t,BIST_TZ).strftime('%Y-%m-%d')
+            year=datetime.fromtimestamp(t,BIST_TZ).year
+            vals.append((t,date,amount)); yearly[year]=yearly.get(year,0.0)+amount
+        except (TypeError,ValueError): continue
+    vals.sort(reverse=True)
+    last12=sum(a for t,_,a in vals if t>=cutoff); price=float(meta.get('regularMarketPrice') or 0)
+    years_paid=sum(1 for v in yearly.values() if v>0); last_date=vals[0][1] if vals else None
+    if not vals or last12<=0 or price<=0: return None
+    yield_pct=last12/price*100; recent_days=max(0,(now-vals[0][0])/86400)
+    recency=max(0.0,1.0-min(recent_days,365)/365); consistency=min(years_paid/5,1.0); yield_score=min(yield_pct/10,1.0)
+    score=round(45*consistency+40*yield_score+15*recency,1)
+    label='Güçlü tarihsel profil' if score>=75 else ('İzlemeye değer' if score>=60 else 'Seçici yaklaş')
+    return {'symbol':str(symbol).replace('.IS',''),'qty':float(portfolio_qty or 0),'annual_dividend':last12,'yield_pct':yield_pct,'years_paid':years_paid,'last_date':last_date,'score':score,'label':label,'source':'Yahoo Finance'}
+
+def _refresh_dividend_dashboard(user_id):
+    portfolio=load_portfolio(user_id)
+    p_syms={str(x['symbol']).replace('.IS','').upper():x for x in portfolio}
+    candidate_syms=[s for s in DIVIDEND_CANDIDATES if s not in p_syms][:5]
+    # Keep dashboard responsive: evaluate portfolio first and a curated candidate universe concurrently.
+    symbols=list(p_syms.keys())+candidate_syms
+    profiles={}
+    errors=[]
+    with ThreadPoolExecutor(max_workers=16) as ex:
+        futures={ex.submit(_dividend_profile,s,p_syms.get(s,{}).get('qty',0)):s for s in symbols}
+        for f in as_completed(futures):
+            sym=futures[f]
+            try:
+                r=f.result()
+                if r: profiles[sym]=r
+            except Exception as e:
+                errors.append({'symbol':sym,'error':str(e)[:160]})
+    port=[]
+    for sym in p_syms:
+        if sym in profiles: port.append(profiles[sym])
+    port.sort(key=lambda x:(-x['annual_dividend']*x['qty'],x['symbol']))
+    candidates=[profiles[s] for s in candidate_syms if s in profiles]
+    candidates.sort(key=lambda x:(-x['score'],-x['yield_pct'],x['symbol']))
+    annual_income=sum(x['annual_dividend']*x['qty'] for x in port)
+    cost=sum(float(x.get('qty',0))*float(x.get('cost',0)) for x in portfolio if str(x['symbol']).replace('.IS','').upper() in {r['symbol'] for r in port})
+    portfolio_yield=(annual_income/cost*100) if cost>0 else None
+    return {'ok':True,'portfolio':port,'candidates':candidates[:12],'portfolio_count':len(port),'candidates_count':len(candidates[:12]),'portfolio_annual_income':annual_income if port else None,'portfolio_yield':portfolio_yield,'errors':errors,'as_of':datetime.now(BIST_TZ).strftime('%Y-%m-%d %H:%M'),'method':'Son 12 ay temettü + 5 yıllık ödeme düzenliliği + güncellik; bilanço sürdürülebilirliği dahil değildir'}
 
 def universe():
     # Keep a conservative fallback. If KAP page exposes a usable list, refresh it.
@@ -500,11 +721,46 @@ def signal_score(d):
     breakdown={'Trend':weights['trend'] if checks['trend'] else 0,'Uzun Vade Trend':weights['long_term'] if checks['long_term'] else 0,'Golden Cross':weights['golden'] if checks['golden'] else 0,'RSI':weights['rsi'] if checks['rsi'] else 0,'Hacim/Akış':weights['volume'] if checks['volume'] else 0,'Breakout':weights['breakout'] if checks['breakout'] else 0,'Momentum':weights['momentum'] if checks['momentum'] else 0,'MACD':weights['macd'] if checks['macd'] else 0,'ADX':weights['adx'] if checks['adx'] else 0}
     return score,checks,breakdown
 
+
+
+def furkai_decision(a, portfolio_position=None):
+    """Portfolio-aware action engine. Price falling alone never triggers an add."""
+    score=float(a.get('score') or 0)
+    momentum=float(a.get('momentum') or 0)
+    volume=float(a.get('volume_ratio') or 0)
+    atr_pct=((a.get('atr') or 0)/max(float(a.get('price') or 1),1))*100 if a.get('atr') is not None else None
+    trend=a.get('trend')=='Yükseliş'
+    owned=portfolio_position is not None
+    weight=float((portfolio_position or {}).get('weight') or 0)
+    reasons=[]; risks=[]
+    if trend: reasons.append('Trend pozitif')
+    else: risks.append('Trend teyidi zayıf')
+    if momentum>0: reasons.append('Momentum pozitif')
+    else: risks.append('Momentum negatif')
+    if volume>=1.2: reasons.append('Hacim teyidi var')
+    else: risks.append('Hacim teyidi zayıf')
+    if score<60: risks.append('Teknik skor düşük')
+    if atr_pct is not None and atr_pct>=5: risks.append('Volatilite yüksek')
+    if weight>=20: risks.append('Pozisyon ağırlığı yüksek')
+    if score>=82 and trend and momentum>0 and volume>=1.2 and (weight<20):
+        action='KADEMELİ EKLE'
+    elif score>=72 and trend and momentum>0 and (volume>=1.0) and weight<15:
+        action='EKLEMEYİ DEĞERLENDİR'
+    elif score>=50:
+        action='TUT / BEKLE'
+    else:
+        action='AZALT / RİSKİ İNCELE'
+    if owned and weight>=20 and action in ('KADEMELİ EKLE','EKLEMEYİ DEĞERLENDİR'):
+        action='TUT / BEKLE'; risks.append('Mevcut pozisyon ağırlığı eklemeyi sınırlıyor')
+    if not trend or momentum<=0:
+        if action in ('KADEMELİ EKLE','EKLEMEYİ DEĞERLENDİR'): action='TUT / BEKLE'
+    return {'action':action,'reasons':reasons,'risks':risks,'owned':owned,'weight':weight,'atr_pct':atr_pct,'add_allowed':action in ('KADEMELİ EKLE','EKLEMEYİ DEĞERLENDİR')}
+
 def analyze(symbol,period='1y'):
     d=history(symbol,period); c=d['close']; h=d['high']; l=d['low']; v=d['volume']; last=c[-1]
     score,checks,breakdown=signal_score(d); e20,e50=ema(c,20),ema(c,50); s50,s200=sma(c,50),sma(c,200); rr=rsi(c); ml,ms=macd(c); ax=adx(h,l,c); atrv=atr(h,l,c); vr=v[-1]/max(sma(v,20) or 1,1); mom=pct_change(c,20); ichi=ichimoku(h,l,c); st=supertrend(h,l,c)
     models=scan_models(d); active_models=[k for k,vv in models.items() if vv]
-    return {'symbol':d['symbol'],'price':last,'signal_timestamp':d['timestamp'][-1],'score':score,'signal':'AL' if score>=70 else ('IZLE' if score>=50 else 'BEKLE'),'trend':'Yükseliş' if checks['trend'] else 'Karışık','rsi':rr,'ema20':e20,'ema50':e50,'sma50':s50,'sma200':s200,'volume_ratio':vr,'macd':ml,'macd_signal':ms,'adx':ax,'atr':atrv,'momentum':mom,'checks':checks,'models':models,'active_models':active_models,'score_breakdown':breakdown,'ichimoku':ichi,'supertrend':st,'score_note':'Teknik sinyal gücü; kâr olasılığı değildir.'}
+    return {'symbol':d['symbol'],'price':last,'signal_timestamp':d['timestamp'][-1],'score':score,'signal':'AL' if score>=70 else ('IZLE' if score>=50 else 'BEKLE'),'trend':'Yükseliş' if checks['trend'] else 'Karışık','rsi':rr,'ema20':e20,'ema50':e50,'sma50':s50,'sma200':s200,'volume_ratio':vr,'macd':ml,'macd_signal':ms,'adx':ax,'atr':atrv,'momentum':mom,'checks':checks,'models':models,'active_models':active_models,'score_breakdown':breakdown,'ichimoku':ichi,'supertrend':st,'score_note':'Teknik sinyal gücü; kâr olasılığı değildir. Fiyatın düşmesi tek başına ekleme sinyali değildir.'}
 
 def record_signals(rows,models):
     if not rows:return
@@ -584,11 +840,28 @@ def _models_match(model_flags, selected, mode='AND', min_models=None):
         return len(matched)>=threshold, matched
     return len(matched)==len(selected), matched
 
-def scan(body):
+def scan(body, user_id=None):
+    # Short-lived result cache: repeated clicks/refreshes should not trigger
+    # hundreds of Yahoo requests again. Cache key is the complete scan intent.
+    try:
+        cache_key=json.dumps({
+            'symbols':body.get('symbols'), 'limit':body.get('limit'),
+            'minimum_score':body.get('minimum_score'), 'period':body.get('period'),
+            'models':body.get('models'), 'mode':body.get('mode'), 'min_models':body.get('min_models')
+        },sort_keys=True,ensure_ascii=False)
+        now=time.time()
+        with SCAN_CACHE_LOCK:
+            hit=SCAN_CACHE.get(cache_key)
+            if hit and now-hit['ts']<SCAN_TTL:
+                cached=json.loads(json.dumps(hit['data']))
+                cached['cached']=True; cached['cache_age_seconds']=round(now-hit['ts'],1)
+                return cached
+    except Exception:
+        cache_key=None
     u=universe(); symbols=[str(s).upper().replace('.IS','') for s in body.get('symbols',u['symbols']) if str(s).upper().replace('.IS','') in u['symbols']]
     limit=min(700,max(1,int(body.get('limit',DEFAULT['scanner_limit'])))); symbols=list(dict.fromkeys(symbols))[:limit]; minimum=max(0,min(100,int(body.get('minimum_score',60))))
     period=body.get('period','1y') if body.get('period','1y') in ('6mo','1y','2y','5y') else '1y'; rows=[]; errors=[]
-    selected=[str(x) for x in body.get('models',[])][:27]; mode=body.get('mode','AND').upper(); explicit_min=body.get('min_models',None); min_models=None if explicit_min in (None,'') else max(1,int(explicit_min))
+    selected=[str(x) for x in body.get('models',[])][:27]; mode=body.get('mode','AND').upper(); explicit_min=body.get('min_models',None); min_models=None if explicit_min in (None,'') else max(1,int(explicit_min)); portfolio_map={p.get('symbol','').upper().replace('.IS',''):p for p in load_portfolio(user_id)}
     try: history('THYAO',period)
     except Exception as e: return {'ok':True,'data_available':False,'error':'Yahoo veri sağlayıcısına erişilemiyor: '+str(e),'results':[],'universe_source':u['source']}
     with ThreadPoolExecutor(max_workers=12) as ex:
@@ -598,11 +871,40 @@ def scan(body):
             try:
                 x=f.result(); active=x['active_models']; ok,matched=_models_match(x['models'],selected,mode,min_models)
                 if ok and x['score']>=minimum:
-                    x['selected_models']=matched; rows.append(x)
+                    x['selected_models']=matched
+                    owned=portfolio_map.get(s)
+                    pos={'weight':0} if owned else None
+                    x['decision']=furkai_decision(x,pos)
+                    x['action']=x['decision']['action']
+                    x['decision_reasons']=x['decision']['reasons']
+                    x['decision_risks']=x['decision']['risks']
+                    x['owned']=bool(owned)
+                    rows.append(x)
             except Exception as e: errors.append({'symbol':s,'error':str(e)[:140]})
     rows.sort(key=lambda x:(-x['score'],-(x['volume_ratio'] or 0),x['symbol']))
     record_signals(rows,selected)
-    return {'ok':True,'data_available':True,'results':rows,'scanned':len(symbols)-len(errors),'requested':len(symbols),'errors':errors,'universe_source':u['source'],'selected_models':selected,'mode':mode,'min_models':min_models}
+    result={'ok':True,'data_available':True,'results':rows,'scanned':len(symbols)-len(errors),'requested':len(symbols),'errors':errors,'universe_source':u['source'],'selected_models':selected,'mode':mode,'min_models':min_models,'cached':False}
+    # Optional Telegram alerts; deduplicated in-process to avoid repeated refresh spam.
+    notify_min=int(os.getenv('FURKAI_NOTIFY_MIN_SCORE','85'))
+    if NOTIFY.telegram_configured:
+        sent=getattr(scan,'_notified',set())
+        for x in rows:
+            if float(x.get('score',0)) >= notify_min and x.get('signal_timestamp'):
+                key=f"{x.get('symbol')}:{int(x.get('signal_timestamp'))}:{x.get('action')}"
+                if key not in sent:
+                    NOTIFY.signal(x.get('symbol'),x.get('action'),x.get('score'),x.get('price'),'; '.join(x.get('decision_reasons',[])[:2]))
+                    sent.add(key)
+        scan._notified=sent
+    if cache_key:
+        try:
+            with SCAN_CACHE_LOCK:
+                SCAN_CACHE[cache_key]={'ts':time.time(),'data':result}
+                # Keep memory bounded to the newest 12 scan intents.
+                if len(SCAN_CACHE)>12:
+                    oldest=sorted(SCAN_CACHE.items(),key=lambda kv:kv[1]['ts'])[:-12]
+                    for k,_ in oldest: SCAN_CACHE.pop(k,None)
+        except Exception: pass
+    return result
 
 def backtest(symbol,days=365,initial=100000):
     """Long-only BIST backtest with explicit, non-look-ahead execution rules.
@@ -638,7 +940,7 @@ def backtest(symbol,days=365,initial=100000):
     if len(d['close']) != required: raise RuntimeError('Backtest veri penceresi beklenenden farklı')
 
     cash=initial; qty=0.0; entry=0.0; stop=0.0; trades=[]; equity=[]
-    peak=initial; max_dd=0.0; fee=0.0008
+    peak=initial; max_dd=0.0; fee=float(os.getenv('FURKAI_COMMISSION_RATE','0.0008')); slippage=float(os.getenv('FURKAI_SLIPPAGE_BPS','5'))/10000.0
     # Pending orders are created only after a completed decision candle.
     pending_entry=False; pending_exit=False; pending_atr=0.0
 
@@ -657,12 +959,13 @@ def backtest(symbol,days=365,initial=100000):
             # Stop is evaluated on the execution session. A gap below stop is
             # filled at open; otherwise the protective stop level is executable.
             if day_low <= stop:
-                exit_price=day_open if day_open < stop else stop
+                base_exit=day_open if day_open < stop else stop
+                exit_price=base_exit*(1-slippage)
                 proceeds=qty*exit_price*(1-fee)
                 pnl=proceeds-(qty*entry*(1+fee)); cash+=proceeds
                 trades.append({'entry':entry,'exit':exit_price,'pnl':pnl,'reason':'STOP','entry_index':exec_i})
             else:
-                exit_price=day_open
+                exit_price=day_open*(1-slippage)
                 proceeds=qty*exit_price*(1-fee)
                 pnl=proceeds-(qty*entry*(1+fee)); cash+=proceeds
                 trades.append({'entry':entry,'exit':exit_price,'pnl':pnl,'reason':'SIGNAL_EXIT_OPEN','entry_index':exec_i})
@@ -672,7 +975,8 @@ def backtest(symbol,days=365,initial=100000):
             # Existing position: protective stop can trigger intraday. No future
             # close is consulted before the stop decision.
             if day_low <= stop:
-                exit_price=day_open if day_open < stop else stop
+                base_exit=day_open if day_open < stop else stop
+                exit_price=base_exit*(1-slippage)
                 proceeds=qty*exit_price*(1-fee)
                 pnl=proceeds-(qty*entry*(1+fee)); cash+=proceeds
                 trades.append({'entry':entry,'exit':exit_price,'pnl':pnl,'reason':'STOP','entry_index':exec_i})
@@ -682,7 +986,7 @@ def backtest(symbol,days=365,initial=100000):
             # Entry is sized from information available at the previous close.
             # pending_entry_price/atr were captured then; no today's high/low/close
             # participates in sizing.
-            entry=day_open
+            entry=day_open*(1+slippage)
             risk_cash=cash*0.01
             risk_per_share=max(2*pending_atr,entry*0.005)
             qty=min(risk_cash/risk_per_share,(cash*0.25)/entry) if entry>0 else 0
@@ -692,7 +996,8 @@ def backtest(symbol,days=365,initial=100000):
                 # If the entry session itself hits the protective stop, it is a
                 # legitimate same-session stop and is handled with only OHLC data.
                 if day_low <= stop:
-                    exit_price=day_open if day_open < stop else stop
+                    base_exit=day_open if day_open < stop else stop
+                    exit_price=base_exit*(1-slippage)
                     proceeds=qty*exit_price*(1-fee)
                     pnl=proceeds-(qty*entry*(1+fee)); cash+=proceeds
                     trades.append({'entry':entry,'exit':exit_price,'pnl':pnl,'reason':'ENTRY_SESSION_STOP','entry_index':exec_i})
@@ -764,23 +1069,29 @@ def backtest(symbol,days=365,initial=100000):
         'trades':len(trades),'win_rate':len(wins)/max(1,len(trades))*100,
         'profit_factor':pf,'expectancy':expectancy,'max_drawdown_pct':max_dd,
         'equity_curve':[{'ts':int(d.get('timestamp',[i for i in range(len(d['close']))])[warmup+i]),'value':float(v)} for i,v in enumerate(equity)],'benchmark_curve':benchmark_curve,'buy_hold_curve':buy_hold_curve,
-        'period_days':days,'requested_days':days,'period_source':period,'side':'LONG_ONLY',
+        'period_days':days,'requested_days':days,'period_source':period,'side':'LONG_ONLY','commission_rate':fee,'slippage_bps':slippage*10000,'slippage_applied':True,
         'note':'Long-only backtest. Sinyal yalnızca tamamlanmış günlük kapanıştan sonra hesaplanır; giriş ve sinyal bazlı çıkış bir sonraki seans açılışında gerçekleşir. Koruyucu stop execution seansının LOW değerinde kontrol edilir; gap-through-stop açılıştan gerçekleşir. Son kararın emri test penceresi dışındaki güne taşmaz. Son açık pozisyon yalnızca son gün kapanışında mark-to-market edilir; aynı kapanıştan yapay çıkış yazılmaz. Komisyon ve risk bazlı pozisyon boyutlandırma dahildir. Günlük OHLC verisinde aynı candle içindeki SL/TP sırası kesin bilinmediğinden yalnızca koruyucu stop modellenir.'
     }
 
 # ---------- Portfolio Intelligence ----------
-def portfolio_intelligence():
-    rows=load_portfolio(); out=[]
+def portfolio_intelligence(user_id):
+    now=time.time()
+    with PORT_INTEL_LOCK:
+        if PORT_INTEL_CACHE['data'] is not None and now-PORT_INTEL_CACHE['ts']<PORT_INTEL_TTL:
+            cached=json.loads(json.dumps(PORT_INTEL_CACHE['data']))
+            cached['cached']=True; cached['cache_age_seconds']=round(now-PORT_INTEL_CACHE['ts'],1)
+            return cached
+    rows=load_portfolio(user_id); out=[]
     for p in rows:
         sym=p['symbol']
         try:
             a=analyze(sym,'1y')
             score=float(a.get('score') or 0)
-            if score>=75: action='TUT / GÜÇLÜ'
-            elif score>=60: action='İZLE'
-            elif score>=45: action='DİKKAT'
-            else: action='RİSK / AZALT'
-            atr_pct=((a.get('atr') or 0)/max(a.get('price') or 1,1))*100 if a.get('atr') is not None else None
+            # Capital-addition rule: a loss alone NEVER triggers averaging down.
+            decision=furkai_decision(a)
+            action=decision['action']
+            atr_pct=decision['atr_pct']
+
             vol_risk='YÜKSEK' if atr_pct is not None and atr_pct>=5 else ('ORTA' if atr_pct is not None and atr_pct>=2.5 else 'DÜŞÜK')
             score_risk='DÜŞÜK' if score>=75 else ('ORTA' if score>=55 else 'YÜKSEK')
             risk='YÜKSEK' if 'YÜKSEK' in (vol_risk,score_risk) else ('ORTA' if 'ORTA' in (vol_risk,score_risk) else 'DÜŞÜK')
@@ -788,13 +1099,19 @@ def portfolio_intelligence():
             price=q.get('price') if isinstance(q,dict) else None
             pnl=((price-p['cost'])*p['qty']) if price is not None else None
             weight=None
-            out.append({'id':p['id'],'symbol':sym,'qty':p['qty'],'cost':p['cost'],'price':price,'pnl':pnl,'score':score,'signal':a.get('signal'),'trend':a.get('trend'),'risk':risk,'action':action,'rsi':a.get('rsi'),'momentum':a.get('momentum'),'volume_ratio':a.get('volume_ratio'),'atr_pct':atr_pct,'active_models':a.get('active_models',[])})
+            out.append({'id':p['id'],'symbol':sym,'qty':p['qty'],'cost':p['cost'],'price':price,'pnl':pnl,'score':score,'signal':a.get('signal'),'trend':a.get('trend'),'risk':risk,'action':action,'rsi':a.get('rsi'),'momentum':a.get('momentum'),'volume_ratio':a.get('volume_ratio'),'atr_pct':atr_pct,'active_models':a.get('active_models',[]),
+                'add_reason':('Güçlü trend + pozitif momentum + yüksek teknik skor; ekleme kademeli değerlendirilebilir.' if score>=78 and a.get('trend')=='Yükseliş' and (a.get('momentum') or 0)>0 else 'Fiyatın düşmüş olması tek başına ekleme gerekçesi değildir; teknik teyit bekleniyor.'),
+                'signal_strength':score})
         except Exception as e:
             out.append({'id':p['id'],'symbol':sym,'qty':p['qty'],'cost':p['cost'],'price':None,'pnl':None,'score':None,'signal':'VERİ YOK','trend':'—','risk':'BİLİNMİYOR','action':'VERİ YOK','error':str(e)})
     total_value=sum((x.get('qty',0)*(x.get('price') or 0)) for x in out)
     for x in out: x['weight']=(x['qty']*(x['price'] or 0)/total_value*100) if total_value else None
     for x in out:
         w=x.get('weight') or 0
+        if x.get('score') is not None:
+            base={'score':x.get('score'),'trend':x.get('trend'),'momentum':x.get('momentum'),'volume_ratio':x.get('volume_ratio'),'atr':(x.get('atr_pct') or 0)*max(x.get('price') or 1,1),'price':x.get('price')}
+            dec=furkai_decision(base, {'weight':w})
+            x['action']=dec['action']; x['add_reason']='; '.join(dec['reasons']) if dec['reasons'] else 'Teknik teyit yetersiz; fiyat düşüşü tek başına ekleme gerekçesi değildir.'; x['decision_reasons']=dec['reasons']; x['decision_risks']=dec['risks']; x['add_allowed']=dec['add_allowed']
         atrp=x.get('atr_pct')
         factors=[]
         if x.get('score') is not None and x['score']<55: factors.append('DÜŞÜK_SKOR')
@@ -828,7 +1145,10 @@ def portfolio_intelligence():
         diversification_label='YÜKSEK' if diversification_score is not None and diversification_score>=70 else ('ORTA' if diversification_score is not None and diversification_score>=45 else ('DÜŞÜK' if diversification_score is not None else 'BİLİNMİYOR'))
     except Exception:
         diversification_score=None; diversification_label='BİLİNMİYOR'; corr_pairs=[]
-    return {'ok':True,'positions':out,'alerts':alerts,'total_value':total_value,'alert_count':len(alerts),'diversification_score':diversification_score,'diversification_label':diversification_label,'correlations':sorted(corr_pairs,key=lambda z:-abs(z['corr']))[:10]}
+    result={'ok':True,'positions':out,'alerts':alerts,'total_value':total_value,'alert_count':len(alerts),'diversification_score':diversification_score,'diversification_label':diversification_label,'correlations':sorted(corr_pairs,key=lambda z:-abs(z['corr']))[:10],'cached':False}
+    with PORT_INTEL_LOCK:
+        PORT_INTEL_CACHE['ts']=time.time(); PORT_INTEL_CACHE['data']=result
+    return result
 
 def market_regime():
     try:
@@ -880,15 +1200,33 @@ def http_json_post(url,payload):
     req=urllib.request.Request(url,data=json.dumps(payload).encode(),headers={'Content-Type':'application/json','User-Agent':'FurkAI-BIST/1.0'},method='POST')
     with urllib.request.urlopen(req,timeout=30) as r:return json.loads(r.read().decode())
 
+
+def dividend_dashboard(user_id):
+    now=time.time()
+    with DIVIDEND_DASH_LOCK:
+        cached=DIVIDEND_DASH_CACHE.get('data')
+        age=now-DIVIDEND_DASH_CACHE.get('ts',0) if cached else None
+        if cached and age < DIVIDEND_DASH_TTL and not DIVIDEND_DASH_CACHE.get('running'):
+            out=dict(cached); out['loading']=False; out['cache_age_seconds']=round(age); return out
+        if not DIVIDEND_DASH_CACHE.get('running'):
+            DIVIDEND_DASH_CACHE['running']=True
+            def job():
+                try:
+                    data=_refresh_dividend_dashboard(user_id)
+                    with DIVIDEND_DASH_LOCK:
+                        DIVIDEND_DASH_CACHE.update({'ts':time.time(),'data':data,'running':False})
+                except Exception as e:
+                    with DIVIDEND_DASH_LOCK:
+                        DIVIDEND_DASH_CACHE.update({'ts':time.time(),'data':{'ok':True,'portfolio':[],'candidates':[],'portfolio_count':0,'candidates_count':0,'portfolio_annual_income':None,'portfolio_yield':None,'errors':[{'symbol':'SYSTEM','error':str(e)}]},'running':False})
+            threading.Thread(target=job,daemon=True).start()
+        if cached:
+            out=dict(cached); out['loading']=True; out['cache_age_seconds']=round(age or 0); return out
+    return {'ok':True,'loading':True,'portfolio':[],'candidates':[],'portfolio_count':0,'candidates_count':0,'portfolio_annual_income':None,'portfolio_yield':None,'errors':[],'message':'Temettü verileri arka planda güncelleniyor.'}
+
 # ---------- HTTP ----------
 USER=os.environ.get('FURKAI_USER','furkai'); PASSWORD=os.environ.get('FURKAI_PASSWORD',''); REQUIRE_AUTH=os.environ.get('FURKAI_REQUIRE_AUTH','0')=='1'
 def auth(h):
-    if not REQUIRE_AUTH and not PASSWORD:return True
-    if not PASSWORD:return False
-    raw=h.get('Authorization','')
-    try:
-        u,p=base64.b64decode(raw[6:]).decode().split(':',1); return hmac.compare_digest(u,USER) and hmac.compare_digest(p,PASSWORD)
-    except:return False
+    return auth_user(h) is not None
 class Handler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         # Render, Safari and health checks may probe URLs with HEAD before GET.
@@ -911,7 +1249,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
         if p.path=='/api/health':
-            payload=json.dumps({'ok':True,'app':'FurkAI BIST','version':DEFAULT.get('app_version','15.0'),'source':'Yahoo Finance/KAP public data'},ensure_ascii=False).encode()
+            payload=json.dumps({'ok':True,'app':'FurkAI BIST','version':DEFAULT.get('app_version',APP_VERSION),'source':'Yahoo Finance/KAP public data'},ensure_ascii=False).encode()
             self.send_response(200)
             self.send_header('Content-Type','application/json; charset=utf-8')
             self.send_header('Content-Length',str(len(payload)))
@@ -931,42 +1269,51 @@ class Handler(BaseHTTPRequestHandler):
         p=urllib.parse.urlparse(self.path)
         if p.path in ('/','/index.html'):
             b=(BASE/'index.html').read_bytes(); self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8'); self.send_header('Content-Length',str(len(b))); self.end_headers(); self.wfile.write(b); return
+        if p.path in ('/manifest.webmanifest','/sw.js') or p.path.startswith('/icon-'):
+            fp=BASE/p.path.lstrip('/')
+            if fp.exists() and fp.is_file():
+                ctype='application/manifest+json' if p.path.endswith('.webmanifest') else 'application/javascript' if p.path.endswith('.js') else 'image/png'
+                b=fp.read_bytes(); self.send_response(200); self.send_header('Content-Type',ctype); self.send_header('Content-Length',str(len(b))); self.end_headers(); self.wfile.write(b); return
         try:
             q=urllib.parse.parse_qs(p.query)
+            if p.path=='/api/health': return self.sendj({'ok':True,'app':'FurkAI BIST','version':DEFAULT.get('app_version',APP_VERSION),'source':'Yahoo Finance/KAP public data'})
+            user=auth_user(self.headers) if p.path.startswith('/api/') else None
+            if p.path.startswith('/api/') and not user:
+                self.send_response(401); self.send_header('WWW-Authenticate','Bearer realm=\"FurkAI BIST\"'); self.end_headers(); return
             if p.path=='/api/market-regime': return self.sendj(market_regime())
-            if p.path=='/api/config': return self.sendj(public_config())
+            if p.path=='/api/config': return self.sendj(public_config(user))
             if p.path=='/api/data-status': return self.sendj(data_status())
-            if p.path=='/api/health': return self.sendj({'ok':True,'app':'FurkAI BIST','version':DEFAULT.get('app_version','15.0'),'source':'Yahoo Finance/KAP public data'})
-            if p.path.startswith('/api/') and not auth(self.headers):
-                self.send_response(401); self.send_header('WWW-Authenticate','Basic realm=\"FurkAI BIST\"'); self.end_headers(); return
             if p.path=='/api/universe': return self.sendj(universe())
             if p.path=='/api/quote': return self.sendj(quote(q.get('symbol',['THYAO'])[0]))
             if p.path=='/api/quotes': return self.sendj(quotes(q.get('symbols',['THYAO,ASELS,THYAO'])[0].split(',')))
             if p.path=='/api/history': return self.sendj({'ok':True,'data':history(q.get('symbol',['THYAO'])[0],q.get('range',['1y'])[0],q.get('interval',['1d'])[0])})
             if p.path=='/api/analyze': return self.sendj({'ok':True,'data':analyze(q.get('symbol',['THYAO'])[0],q.get('range',['1y'])[0])})
-            if p.path=='/api/portfolio': return self.sendj({'ok':True,'portfolio':load_portfolio()})
-            if p.path=='/api/portfolio/intelligence': return self.sendj(portfolio_intelligence())
+            if p.path=='/api/portfolio': return self.sendj({'ok':True,'portfolio':load_portfolio(user['id'])})
+            if p.path=='/api/portfolio/intelligence': return self.sendj(portfolio_intelligence(user['id']))
             if p.path=='/api/backtest': return self.sendj(backtest(q.get('symbol',['THYAO'])[0],int(q.get('days',['365'])[0]),float(q.get('initial',['100000'])[0])))
             if p.path=='/api/kap': return self.sendj(kap_info(q.get('symbol',['THYAO'])[0]))
+            if p.path=='/api/dividends-dashboard': return self.sendj(dividend_dashboard(user['id']))
             if p.path=='/api/dividends':
                 d=yahoo_chart(q.get('symbol',['THYAO'])[0],'5y','1d'); div=d.get('events',{}).get('dividends',{}); vals=[]
                 for ts,x in div.items(): vals.append({'date':time.strftime('%Y-%m-%d',time.localtime(int(ts))),'amount':x.get('amount'),'symbol':d['symbol']})
                 return self.sendj({'ok':True,'dividends':sorted(vals,key=lambda x:x['date'],reverse=True)})
-            if p.path=='/api/scan': return self.sendj(scan({'period':q.get('range',['1y'])[0],'limit':int(q.get('limit',['200'])[0]),'minimum_score':int(q.get('min',['60'])[0]),'models':[x for x in q.get('models',[''])[0].split('|') if x],'mode':q.get('mode',['AND'])[0],'min_models':(q.get('min_models',[None])[0] if q.get('min_models',[None])[0] not in (None,'') else None)}))
+            if p.path=='/api/scan': return self.sendj(scan({'period':q.get('range',['1y'])[0],'limit':int(q.get('limit',['200'])[0]),'minimum_score':int(q.get('min',['60'])[0]),'models':[x for x in q.get('models',[''])[0].split('|') if x],'mode':q.get('mode',['AND'])[0],'min_models':(q.get('min_models',[None])[0] if q.get('min_models',[None])[0] not in (None,'') else None)}, user['id']))
             if p.path=='/api/signals': return self.sendj(signal_history(int(q.get('limit',['200'])[0]), q.get('symbol',[None])[0]))
             self.sendj({'ok':False,'error':'Not found'},404)
         except Exception as e:self.sendj({'ok':False,'error':str(e)},500)
     def do_POST(self):
-        if not auth(self.headers): self.send_response(401); self.send_header('WWW-Authenticate','Basic realm="FurkAI BIST"'); self.end_headers(); return
+        user=auth_user(self.headers)
+        if not user: self.send_response(401); self.send_header('WWW-Authenticate','Bearer realm="FurkAI BIST"'); self.end_headers(); return
         try:
             n=int(self.headers.get('Content-Length','0')); body=json.loads(self.rfile.read(n) or b'{}')
-            if self.path=='/api/portfolio/save': save_portfolio(body.get('portfolio',[])); return self.sendj({'ok':True,'portfolio':load_portfolio()})
+            if self.path=='/api/portfolio/save': save_portfolio(body.get('portfolio',[]),user['id']); return self.sendj({'ok':True,'portfolio':load_portfolio(user['id'])})
             if self.path=='/api/config':
+                if not user.get('is_admin'): return self.sendj({'ok':False,'error':'Paylaşılan uygulama ayarlarını yalnızca yönetici değiştirebilir'},403)
                 return self.sendj(save_config(body))
             if self.path=='/api/gemini-test': return self.sendj(test_gemini())
             if self.path=='/api/ai':
                 sym=str(body.get('symbol','THYAO')).upper(); a=analyze(sym); prompt=body.get('prompt') or f'''BIST hissesi {sym} için yalnızca verilen teknik veriyi kullan. Veri uydurma. Cevabı SADECE geçerli JSON olarak üret: {{"decision":"GÜÇLÜ_ADAY|İZLE|NÖTR|RİSKLİ","confidence":0,"reasons":[],"risks":[],"suggested_entry":null,"stop":null,"target":null,"invalidate_reason":""}}. Sayısal seviyeler veriden güvenilir biçimde çıkarılamıyorsa null bırak. Teknik veri: {json.dumps(a,ensure_ascii=False)}'''; return self.sendj(gemini(prompt))
-            if self.path=='/api/scan': return self.sendj(scan(body))
+            if self.path=='/api/scan': return self.sendj(scan(body,user['id']))
             self.sendj({'ok':False,'error':'Not found'},404)
         except Exception as e:self.sendj({'ok':False,'error':str(e)},500)
 

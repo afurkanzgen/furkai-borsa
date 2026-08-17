@@ -1,3 +1,5 @@
+FurkAI BIST V15.9.3 Mobile/PWA
+
 # FurkAI V15 Web / iPhone
 
 - Web/PWA: Safari veya Chrome üzerinden açılır.

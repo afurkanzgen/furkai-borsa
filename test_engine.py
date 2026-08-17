@@ -187,7 +187,7 @@ def test_52h_not_breakout_when_current_is_below_previous_high():
 
 
 def test_signal_ui_calls_price_signal_price():
-    body=open('index.html',encoding='utf-8').read()
+    body=open('app.js',encoding='utf-8').read()
     assert '<th>Sinyal Fiyatı</th>' in body
     assert '<td>${fmt(x.entry)}</td>' in body
 
@@ -244,11 +244,11 @@ def test_version_is_consistent():
     wsgi_src=open('server_wsgi.py',encoding='utf-8').read()
     html=open('index.html',encoding='utf-8').read()
     readme=open('README.md',encoding='utf-8').read()
-    assert server.DEFAULT['app_version']=='15.0'
-    assert "'15.0'" in server_src
-    assert "'15.0'" in wsgi_src
-    assert 'V15.0' in html
-    assert 'v14' in readme
+    assert server.DEFAULT['app_version']=='15.9.6'
+    assert "APP_VERSION='15.9.6'" in server_src
+    assert "server.APP_VERSION" in wsgi_src
+    assert 'V15.9.6' in html
+    assert 'v15.8' in readme.lower()
 
 
 
@@ -259,8 +259,9 @@ def test_portfolio_server_validation():
     with tempfile.TemporaryDirectory() as td:
         server.DB=pathlib.Path(td)/'test.db'
         try:
-            server.save_portfolio([{'id':1,'symbol':'THYAO.IS','qty':10,'cost':100}])
-            assert server.load_portfolio()[0]['symbol']=='THYAO.IS'
+            u=server.create_user('testuser','StrongPass123!')
+            server.save_portfolio([{'id':1,'symbol':'THYAO.IS','qty':10,'cost':100}],u['id'])
+            assert server.load_portfolio(u['id'])[0]['symbol']=='THYAO.IS'
             for bad in [
                 [{'id':2,'symbol':'THYAO.IS','qty':0,'cost':100}],
                 [{'id':3,'symbol':'bad!','qty':1,'cost':100}],
@@ -268,7 +269,7 @@ def test_portfolio_server_validation():
                 [{'id':5,'symbol':'THYAO.IS','qty':1,'cost':100},{'id':5,'symbol':'ASELS.IS','qty':1,'cost':100}],
             ]:
                 try:
-                    server.save_portfolio(bad)
+                    server.save_portfolio(bad,u['id'])
                     raise AssertionError('Geçersiz portföy kaydı kabul edildi')
                 except ValueError:
                     pass
@@ -407,12 +408,41 @@ def test_scanner_accepts_all_27_models_and_min_models():
 
 def test_health_version_matches_app_version():
     body=inspect.getsource(server.Handler.do_GET)
-    assert "DEFAULT.get('app_version','15.0')" in body
+    assert "DEFAULT.get('app_version',APP_VERSION)" in body
 
 
 def test_scanner_get_preserves_min_models_parameter():
     body=inspect.getsource(server.Handler.do_GET)
     assert "'min_models'" in body and "q.get('min_models'" in body
+
+
+def test_wsgi_static_assets_support_get_and_head():
+    from wsgiref.util import setup_testing_defaults
+    from io import BytesIO
+    import server_wsgi
+    for path in ('/manifest.webmanifest','/sw.js','/icon-180.png','/icon-512.png'):
+        for method in ('GET','HEAD'):
+            env={}; setup_testing_defaults(env); env.update({'PATH_INFO':path,'REQUEST_METHOD':method,'wsgi.input':BytesIO(b''),'CONTENT_LENGTH':'0','QUERY_STRING':''})
+            captured=[]
+            def sr(status,headers,exc_info=None): captured.append((status,headers)); return lambda data: None
+            body=b''.join(server_wsgi.app(env,sr))
+            assert captured and captured[0][0]=='200 OK', (path,method,captured)
+            if method=='GET': assert body, (path,method)
+
+
+def test_mobile_nav_selector_is_valid():
+    html=open('index.html',encoding='utf-8').read()
+    assert '.mobile-bar [data-mobile-page]' in html
+    assert '.mobile-bottom-nav [data-mobile-page]' not in html
+
+
+def test_no_stale_v15_references_in_runtime_files():
+    current='15.8'
+    stale=('15.0','15.1','15.2','15.3','15.4','15.5')
+    for name in ('server.py','server_wsgi.py','index.html','sw.js','manifest.webmanifest','README.md','README_MOBILE.md'):
+        text=open(name,encoding='utf-8').read()
+        if name != 'server_wsgi.py': assert current in text, name
+        assert all(v not in text for v in stale), name
 
 
 def test_frontend_chart_has_trading_interactions():
@@ -442,9 +472,10 @@ def test_chart_supports_extended_timeframes_and_drawings():
     for token in ("'1m'","'5m'","'15m'","'30m'","'1h'","'2h'","'4h'","'1d'","'1w'","'1mo'"): assert token in src
     for token in ("function setDrawMode(mode)","function drawChartOverlays","function startChartLiveRefresh","tf15m","tf1mo"): assert token in html
 
-def test_backtest_exposes_equity_curve():
-    src=open('server.py',encoding='utf-8').read(); html=open('index.html',encoding='utf-8').read()
-    assert "'equity_curve'" in src and 'drawBacktestCurves' in html
+def test_backtest_backend_exposes_equity_curve():
+    src=open('server.py',encoding='utf-8').read()
+    js=open('app.js',encoding='utf-8').read()
+    assert "'equity_curve'" in src and 'drawBacktestCurves' not in js
 
 def test_portfolio_intelligence_has_risk_and_diversification():
     src=open('server.py',encoding='utf-8').read(); html=open('index.html',encoding='utf-8').read()
@@ -463,7 +494,7 @@ def test_market_regime_endpoint_and_dashboard():
 def test_settings_schema_and_masking():
     old=dict(server.DEFAULT)
     try:
-        server.DEFAULT.update({'gemini_key':'AIzaTEST1234','gemini_model':'gemini-3.6-flash','scanner_limit':250,'default_period':'1y','default_interval':'1d','refresh_seconds':15,'auto_refresh':True,'app_version':'15.0'})
+        server.DEFAULT.update({'gemini_key':'AIzaTEST1234','gemini_model':'gemini-3.6-flash','scanner_limit':250,'default_period':'1y','default_interval':'1d','refresh_seconds':15,'auto_refresh':True,'app_version':'15.8'})
         cfg=server.public_config()
         assert cfg['gemini_configured'] is True
         assert cfg['gemini_key_masked'].endswith('1234')
@@ -492,7 +523,7 @@ def test_frontend_settings_page_and_single_backtest_function():
     html=open('index.html',encoding='utf-8').read()
     assert 'section id="settings"' in html
     assert 'setGeminiKey' in html and '/api/config' in html and '/api/data-status' in html
-    assert html.count('async function runBacktest(){')==1
+    assert 'runBacktest' not in html and 'runBacktest' not in open('app.js',encoding='utf-8').read()
 
 
 def test_wsgi_has_config_and_data_status_routes():
@@ -513,7 +544,7 @@ def test_frontend_has_no_obvious_async_duplication():
     html=open('index.html',encoding='utf-8').read()
     assert 'async async' not in html
     assert html.count('async function aiStock(){')==1
-    assert html.count('async function runBacktest(){')==1
+    assert 'runBacktest' not in html and 'runBacktest' not in open('app.js',encoding='utf-8').read()
 
 
 def test_backtest_exposes_benchmark_and_buy_hold_curves():

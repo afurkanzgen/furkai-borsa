@@ -1,13 +1,13 @@
-# FurkAI BIST v15.0
+# FurkAI BIST v15.8
 
 BIST analiz, tarama, portföy ve long-only backtest terminali.
 
-## v15.0 güvenlik ve QA düzeltmeleri
+## v15.8 güvenlik ve QA düzeltmeleri
 
 - Gemini API anahtarı artık `config.json` içinde şifreli (Fernet) saklanır; deploy ortamında `FURKAI_SECRET_KEY` kullanılması önerilir.
 - Ayarlar ekranına Gemini bağlantı testi ve veri sağlığı göstergeleri eklendi.
 - Config dosyası ve yerel secret dosyası için kullanıcıya özel dosya izinleri uygulanır.
-- Health/config sürüm bilgisi 15.0 ile tutarlı hale getirildi.
+- Health/config sürüm bilgisi 15.8 ile tutarlı hale getirildi.
 
 ## v14 düzeltmeleri
 
@@ -50,9 +50,31 @@ Production deploy için Render environment variables: `FURKAI_USER`, `FURKAI_PAS
 Uygulama ilk kez boş SQLite veritabanıyla başlatıldığında, kullanıcının 13 Ağustos 2026 tarihli son portföy ekranından girilen 11 pozisyon otomatik olarak başlangıç portföyüne alınır. Sonraki çalıştırmalarda mevcut veritabanı korunur.
 
 
-## V15.0 Mobile/PWA
+## V15.8.7.2 Mobile/PWA
 - iPhone/Android responsive layout under 700px.
 - Bottom navigation for Ana, Tarama, Grafik, Portföy, Ayarlar.
 - Safe-area support for iPhone.
 - PWA manifest and service worker included.
 - API routes are never cached by the service worker.
+
+
+## V15.8.7.2 startup fix
+`start.bat` uses a single CMD window, installs missing cryptography dependency, starts the server in the same console, waits for `/api/health`, then opens the browser.
+
+## V15.9.4 architecture upgrade
+- FastAPI is now the primary ASGI server (`api_fast.py`).
+- `/ws/signals` provides a WebSocket signal stream with periodic scan updates.
+- In-memory API rate limiting is enabled via `FURKAI_RATE_LIMIT` (default 120/min/IP).
+- `notification_service.py` supports optional Telegram alerts through environment variables.
+- `backtest_engine.py` provides a modular `BacktestEngine` facade and Monte Carlo trade-PnL simulation.
+- Backtest execution now applies configurable commission and slippage (`FURKAI_COMMISSION_RATE`, `FURKAI_SLIPPAGE_BPS`).
+- Yahoo Finance remains primary; Stooq is used as a secondary daily-data fallback when Yahoo is unavailable.
+- `.env.example` documents local development secrets; production secrets should be configured as Render environment variables.
+
+
+## V15.9.6 multi-user transition
+- Open registration via `/api/auth/register` and session login via `/api/auth/login`.
+- Portfolio rows are isolated by `user_id`.
+- Existing single-user local portfolio is claimed by the first local account; Render production uses `FURKAI_USER`/`FURKAI_PASSWORD` as the bootstrap admin and claims the legacy portfolio on first database access.
+- Gemini is a shared application key; only the admin can change it. Other users can see only masked status.
+- Sessions are stored as SHA-256 token hashes with a 7-day expiry; passwords use PBKDF2-HMAC-SHA256 with per-user salts.

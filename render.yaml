@@ -3,8 +3,12 @@ services:
     name: furkai-bist
     runtime: python
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "python server_wsgi.py"
+    startCommand: "uvicorn api_fast:app --host 0.0.0.0 --port $PORT"
     healthCheckPath: /api/health
+    disk:
+      name: furkai-data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: PYTHON_VERSION
         value: "3.11.9"
@@ -15,4 +19,10 @@ services:
       - key: FURKAI_REQUIRE_AUTH
         value: "1"
       - key: FURKAI_SECRET_KEY
+        sync: false
+      - key: FURKAI_DATA_DIR
+        value: /var/data
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
         sync: false
